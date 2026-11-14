@@ -3,25 +3,24 @@ krypton.lua
 small rectangle ui, aimbot, esp, silent aim
 executor: loadstring(game:HttpGet("URL"))()
 controls: insert = toggle ui | right mouse = aimbot / silent aim | end = unload
+every executor-specific call is pcall'd; the render loop connects no matter what
 --]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
-local Camera = workspace.CurrentCamera
 
 local CFG = {
     Aimbot = {
         Enabled = true,
         Silent = false,
         TeamCheck = true,
-        WallCheck = true,
-        Smooth = true,
-        Smoothness = 0.3,
-        FOVRadius = 160,
-        Prediction = 0.1,
+        WallCheck = false,
+        Smooth = 0.25,
+        FOV = 160,
         Bone = "Head",
+        Key = Enum.UserInputType.MouseButton2,
     },
     ESP = {
         Enabled = true,
@@ -30,438 +29,500 @@ local CFG = {
         Distance = true,
         Health = true,
         Tracers = true,
-        Chams = false,
-        MaxDistance = 2500,
-        BoxColor = Color3.fromRGB(0, 255, 255),
-        NameColor = Color3.fromRGB(255, 255, 255),
-        DistColor = Color3.fromRGB(200, 200, 200),
-        HealthColor = Color3.fromRGB(0, 255, 0),
-        TracerColor = Color3.fromRGB(255, 255, 255),
+        MaxDistance = 3000,
+        Color = Color3.fromRGB(0, 255, 255),
     },
     UI = {
-        ToggleKey = Enum.KeyCode.Insert,
-        UnloadKey = Enum.KeyCode.End,
+        Toggle = Enum.KeyCode.Insert,
+        Unload = Enum.KeyCode.End,
         Accent = Color3.fromRGB(0, 255, 255),
-        Background = Color3.fromRGB(15, 15, 20),
+        Bg = Color3.fromRGB(12, 12, 16),
     },
 }
 
 local state = {
-    UIOpen = true,
-    MouseHeld = false,
-    SilentTarget = nil,
-    Connections = {},
-    ESPData = {},
-    GUI = {},
+    open = true,
+    held = false,
+    target = nil,
+    hookOk = false,
+    drawingOk = false,
+    conns = {},
+    esps = {},
+    gui = {},
 }
 
-local function newDrawing(class, props)
-    local ok, obj = pcall(function()
-        local inst = Drawing.new(class)
-        if props then
-            for k, v in pairs(props) do inst[k] = v end
-        end
-        return inst
+local unpackFn = table.unpack or unpack
+
+state.drawingOk = (function()
+    local ok = pcall(function()
+        local d = Drawing.new("Square")
+        d:Remove()
     end)
-    return ok and obj or nil
+    return ok
+end)()
+
+local function newD(class, props)
+    if not state.drawingOk then return nil end
+    local ok, obj = pcall(function() return Drawing.new(class) end)
+    if not ok or not obj then return nil end
+    if props then
+        for k, v in pairs(props) do
+            pcall(function() obj[k] = v end)
+        end
+    end
+    return obj
 end
 
-local function remove(obj)
-    if obj then pcall(function() obj:Remove() end) end
-end
-
-local function destroy(obj)
-    if obj then pcall(function() obj:Destroy() end) end
-end
-
-local function getChar(p) return p and p.Character end
-local function getRoot(c)
-    if not c then return nil end
-    return c:FindFirstChild("HumanoidRootPart") or c:FindFirstChildWhichIsA("BasePart")
-end
-local function getHum(c)
-    if not c then return nil end
-    return c:FindFirstChildOfClass("Humanoid")
-end
-local function getBone(c, name)
-    if not c then return nil end
-    local part = c:FindFirstChild(name, true)
-    if part then return part end
-    return getRoot(c)
+local function w2s(pos)
+    local cam = workspace.CurrentCamera
+    if not cam then return nil end
+    local ok, sp, on = pcall(function() return cam:WorldToViewportPoint(pos) end)
+    if not ok or not on then return nil end
+    if sp.Z <= 0 then return nil end
+    return Vector2.new(sp.X, sp.Y), sp.Z
 end
 
 local function isEnemy(p)
-    local myTeam = LocalPlayer.Team
-    local theirTeam = p.Team
-    if myTeam == nil or theirTeam == nil then return true end
-    return theirTeam ~= myTeam
+    if not CFG.Aimbot.TeamCheck then return true end
+    local m = LocalPlayer.Team
+    local t = p.Team
+    if m == nil or t == nil then return true end
+    return m ~= t
 end
 
-local function w2s(point)
+-- ESP
+
+local function makeESP(p, char)
+    local e = { char = char, p = p }
+    if state.drawingOk then
+        e.box = newD("Square", {Thickness = 2, Filled = false, Visible = false})
+        e.boxOut = newD("Square", {Thickness = 4, Filled = false, Color = Color3.new(0, 0, 0), Visible = false})
+        e.name = newD("Text", {Size = 16, Center = true, Outline = true, OutlineColor = Color3.new(0, 0, 0), Visible = false})
+        e.dist = newD("Text", {Size = 14, Center = true, Outline = true, OutlineColor = Color3.new(0, 0, 0), Visible = false})
+        e.hp = newD("Line", {Thickness = 3, Visible = false})
+        e.hpBack = newD("Line", {Thickness = 5, Color = Color3.new(0, 0, 0), Visible = false})
+        e.tracer = newD("Line", {Thickness = 1, Visible = false})
+    else
+        local hl = Instance.new("Highlight")
+        hl.FillColor = CFG.ESP.Color
+        hl.OutlineColor = CFG.ESP.Color
+        hl.FillTransparency = 0.55
+        hl.OutlineTransparency = 0
+        hl.Enabled = false
+        hl.Adornee = char
+        hl.Parent = char
+        e.highlight = hl
+        local head = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+        if head then
+            local bb = Instance.new("BillboardGui")
+            bb.Name = "KryptonTag"
+            bb.Size = UDim2.new(0, 140, 0, 30)
+            bb.StudsOffset = Vector3.new(0, 2.2, 0)
+            bb.AlwaysOnTop = true
+            bb.ResetOnSpawn = false
+            bb.Parent = head
+            local lbl = Instance.new("TextLabel")
+            lbl.Size = UDim2.new(1, 0, 1, 0)
+            lbl.BackgroundTransparency = 1
+            lbl.TextColor3 = Color3.new(1, 1, 1)
+            lbl.TextStrokeTransparency = 0
+            lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+            lbl.Font = Enum.Font.Code
+            lbl.TextSize = 14
+            lbl.Text = ""
+            lbl.Parent = bb
+            e.billboard = bb
+            e.label = lbl
+        end
+    end
+    return e
+end
+
+local function hideESP(e)
+    if not e then return end
+    if e.box then e.box.Visible = false end
+    if e.boxOut then e.boxOut.Visible = false end
+    if e.name then e.name.Visible = false end
+    if e.dist then e.dist.Visible = false end
+    if e.hp then e.hp.Visible = false end
+    if e.hpBack then e.hpBack.Visible = false end
+    if e.tracer then e.tracer.Visible = false end
+    if e.highlight then e.highlight.Enabled = false end
+    if e.label then e.label.Visible = false end
+end
+
+local function destroyESP(e)
+    if not e then return end
+    hideESP(e)
+    if e.box then pcall(function() e.box:Remove() end) end
+    if e.boxOut then pcall(function() e.boxOut:Remove() end) end
+    if e.name then pcall(function() e.name:Remove() end) end
+    if e.dist then pcall(function() e.dist:Remove() end) end
+    if e.hp then pcall(function() e.hp:Remove() end) end
+    if e.hpBack then pcall(function() e.hpBack:Remove() end) end
+    if e.tracer then pcall(function() e.tracer:Remove() end) end
+    if e.highlight then pcall(function() e.highlight:Destroy() end) end
+    if e.billboard then pcall(function() e.billboard:Destroy() end) end
+end
+
+local function getESP(p, char)
+    local e = state.esps[p]
+    if e and e.char == char then return e end
+    if e then destroyESP(e) end
+    e = makeESP(p, char)
+    state.esps[p] = e
+    return e
+end
+
+local function stepESP()
     local cam = workspace.CurrentCamera
-    if not cam then return nil, false, math.huge end
-    local vp, onScreen, depth = cam:WorldToViewportPoint(point)
-    return Vector2.new(vp.X, vp.Y), onScreen, depth
+    if not cam then return end
+    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and isEnemy(p) then
+            local char = p.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            local root = char and (char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart"))
+            local visible = CFG.ESP.Enabled and hum ~= nil and hum.Health > 0 and root ~= nil
+            local sp, depth = nil, nil
+
+            if visible then
+                sp, depth = w2s(root.Position)
+                if sp == nil or depth == nil or depth > CFG.ESP.MaxDistance then
+                    visible = false
+                end
+            end
+
+            local e = state.esps[p]
+
+            if visible then
+                e = getESP(p, char)
+
+                if state.drawingOk then
+                    local head = char:FindFirstChild("Head")
+                    local topPos = nil
+                    local botPos = nil
+                    if head then topPos = w2s(head.Position + Vector3.new(0, 0.7, 0)) end
+                    botPos = w2s(root.Position - Vector3.new(0, 3, 0))
+
+                    if topPos and botPos and e.box then
+                        local height = math.abs(topPos.Y - botPos.Y)
+                        if height < 6 then height = 6 end
+                        local width = height * 0.5
+                        local bx = Vector2.new(topPos.X - width / 2, topPos.Y)
+
+                        if CFG.ESP.Boxes then
+                            e.box.Size = Vector2.new(width, height)
+                            e.box.Position = bx
+                            e.box.Color = CFG.ESP.Color
+                            e.box.Visible = true
+                            if e.boxOut then
+                                e.boxOut.Size = Vector2.new(width, height)
+                                e.boxOut.Position = bx
+                                e.boxOut.Visible = true
+                            end
+                        else
+                            e.box.Visible = false
+                            if e.boxOut then e.boxOut.Visible = false end
+                        end
+
+                        if CFG.ESP.Names and e.name then
+                            e.name.Text = p.Name
+                            e.name.Position = Vector2.new(topPos.X, topPos.Y - 18)
+                            e.name.Color = Color3.new(1, 1, 1)
+                            e.name.Visible = true
+                        elseif e.name then
+                            e.name.Visible = false
+                        end
+
+                        if CFG.ESP.Distance and e.dist then
+                            e.dist.Text = string.format("%dm", math.floor(depth))
+                            e.dist.Position = Vector2.new(topPos.X, topPos.Y + height + 2)
+                            e.dist.Color = Color3.fromRGB(200, 200, 200)
+                            e.dist.Visible = true
+                        elseif e.dist then
+                            e.dist.Visible = false
+                        end
+
+                        if CFG.ESP.Health and e.hp and e.hpBack then
+                            local ratio = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                            local bh = height * ratio
+                            e.hp.From = Vector2.new(bx.X - 8, botPos.Y - bh)
+                            e.hp.To = Vector2.new(bx.X - 8, botPos.Y)
+                            e.hp.Color = Color3.fromRGB(0, 255, 0):Lerp(Color3.fromRGB(255, 0, 0), 1 - ratio)
+                            e.hp.Visible = true
+                            e.hpBack.From = Vector2.new(bx.X - 9, botPos.Y - height - 1)
+                            e.hpBack.To = Vector2.new(bx.X - 9, botPos.Y + 1)
+                            e.hpBack.Visible = true
+                        else
+                            if e.hp then e.hp.Visible = false end
+                            if e.hpBack then e.hpBack.Visible = false end
+                        end
+
+                        if CFG.ESP.Tracers and e.tracer then
+                            e.tracer.From = center
+                            e.tracer.To = sp
+                            e.tracer.Color = Color3.new(1, 1, 1)
+                            e.tracer.Visible = true
+                        elseif e.tracer then
+                            e.tracer.Visible = false
+                        end
+                    else
+                        if e.box then e.box.Visible = false end
+                        if e.boxOut then e.boxOut.Visible = false end
+                    end
+                else
+                    if e.highlight then
+                        e.highlight.Enabled = true
+                        e.highlight.Adornee = char
+                        e.highlight.FillColor = CFG.ESP.Color
+                        e.highlight.OutlineColor = CFG.ESP.Color
+                    end
+                    if e.label then
+                        local parts = { p.Name }
+                        if CFG.ESP.Distance and depth then
+                            table.insert(parts, string.format("%dm", math.floor(depth)))
+                        end
+                        if CFG.ESP.Health and hum then
+                            table.insert(parts, math.floor(hum.Health) .. "hp")
+                        end
+                        e.label.Text = table.concat(parts, " | ")
+                        e.label.Visible = CFG.ESP.Names or CFG.ESP.Distance or CFG.ESP.Health
+                    end
+                end
+            else
+                if e then hideESP(e) end
+            end
+        end
+    end
+
+    for p, e in pairs(state.esps) do
+        if not p.Parent then
+            destroyESP(e)
+            state.esps[p] = nil
+        end
+    end
 end
 
-local function closestTarget()
+-- FOV circle
+
+local fovCircle = nil
+
+local function stepFOV()
+    if not state.drawingOk then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    if not fovCircle then
+        fovCircle = newD("Circle", {Thickness = 2, Filled = false, Color = CFG.UI.Accent})
+    end
+    if fovCircle then
+        fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+        fovCircle.Radius = CFG.Aimbot.FOV
+        fovCircle.Visible = CFG.Aimbot.Enabled
+    end
+end
+
+-- Aimbot
+
+local function getTarget()
     local cam = workspace.CurrentCamera
     if not cam then return nil end
     local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-    local origin = cam.CFrame.Position
-    local bestPart, bestDist = nil, math.huge
+    local best, bestD = nil, CFG.Aimbot.FOV
+
     for _, p in ipairs(Players:GetPlayers()) do
-        if p == LocalPlayer then continue end
-        if not isEnemy(p) then continue end
-        local c = getChar(p)
-        local h = getHum(c)
-        local part = getBone(c, CFG.Aimbot.Bone)
-        if not h or h.Health <= 0 or not part then continue end
-        local pos, onScreen, depth = w2s(part.Position)
-        if not onScreen then continue end
-        if CFG.Aimbot.WallCheck then
-            local ray = (part.Position - origin).Unit * depth
-            local result = workspace:Raycast(origin, ray)
-            if result and result.Instance and not result.Instance:IsDescendantOf(c) then continue end
-        end
-        local dist = (pos - center).Magnitude
-        if dist > CFG.Aimbot.FOVRadius then continue end
-        if dist < bestDist then
-            bestDist = dist
-            bestPart = part
-        end
-    end
-    return bestPart
-end
-
-local function aimAt(part)
-    if not part then return end
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-    local target = part.Position
-    local vel = part.AssemblyLinearVelocity or Vector3.new(0, 0, 0)
-    target = target + vel * CFG.Aimbot.Prediction
-    local desired = CFrame.lookAt(cam.CFrame.Position, target)
-    if CFG.Aimbot.Smooth then
-        cam.CFrame = cam.CFrame:Lerp(desired, CFG.Aimbot.Smoothness)
-    else
-        cam.CFrame = desired
-    end
-end
-
-local function installSilentAim()
-    local ok, mt = pcall(getrawmetatable, game)
-    if not ok or not mt then return end
-    local ok2, setro = pcall(function() return setreadonly end)
-    local old = mt.__namecall
-    if ok2 then pcall(function() setro(mt, false) end) end
-    mt.__namecall = newcclosure(function(self, ...)
-        local method = getnamecallmethod()
-        local args = { ... }
-        if state.MouseHeld and state.SilentTarget and CFG.Aimbot.Silent and self == workspace and method == "Raycast" then
-            local origin = args[1]
-            if origin then
-                local dir = (state.SilentTarget - origin).Unit
-                args[2] = dir * (args[2] and args[2].Magnitude or 1000)
+        if p ~= LocalPlayer and isEnemy(p) then
+            local char = p.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            local part = char and (char:FindFirstChild(CFG.Aimbot.Bone, true) or char:FindFirstChild("HumanoidRootPart"))
+            if hum and hum.Health > 0 and part then
+                local sp, depth = w2s(part.Position)
+                if sp and depth and depth <= CFG.ESP.MaxDistance then
+                    local d = (sp - center).Magnitude
+                    if d <= bestD then
+                        bestD = d
+                        best = part
+                    end
+                end
             end
         end
-        return old(self, unpack(args))
-    end)
-    if ok2 then pcall(function() setro(mt, true) end) end
+    end
+    return best
 end
 
-local function buildESP(p)
-    return {
-        Box = newDrawing("Square", {Thickness = 2, Filled = false, Visible = false}),
-        BoxOut = newDrawing("Square", {Thickness = 4, Filled = false, Color = Color3.new(0, 0, 0), Visible = false}),
-        Name = newDrawing("Text", {Size = 16, Center = true, Outline = true, OutlineColor = Color3.new(0, 0, 0), Visible = false}),
-        Dist = newDrawing("Text", {Size = 14, Center = true, Outline = true, OutlineColor = Color3.new(0, 0, 0), Visible = false}),
-        Health = newDrawing("Line", {Thickness = 3, Visible = false}),
-        HealthBack = newDrawing("Line", {Thickness = 5, Color = Color3.new(0, 0, 0), Visible = false}),
-        Tracer = newDrawing("Line", {Thickness = 1.5, Visible = false}),
-        Highlight = Instance.new("Highlight"),
-    }
-end
-
-local function updateESP()
-    if not CFG.ESP.Enabled then
-        for _, d in pairs(state.ESPData) do
-            d.Box.Visible = false
-            d.BoxOut.Visible = false
-            d.Name.Visible = false
-            d.Dist.Visible = false
-            d.Health.Visible = false
-            d.HealthBack.Visible = false
-            d.Tracer.Visible = false
-            d.Highlight.Enabled = false
-        end
+local function stepAimbot()
+    if not (CFG.Aimbot.Enabled and state.held) then
+        state.target = nil
         return
     end
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p == LocalPlayer then continue end
-        if not isEnemy(p) then continue end
-        local c = getChar(p)
-        local h = getHum(c)
-        local root = getRoot(c)
-        if not h or h.Health <= 0 or not root then
-            local d = state.ESPData[p]
-            if d then
-                d.Box.Visible = false
-                d.BoxOut.Visible = false
-                d.Name.Visible = false
-                d.Dist.Visible = false
-                d.Health.Visible = false
-                d.HealthBack.Visible = false
-                d.Tracer.Visible = false
-                d.Highlight.Enabled = false
-                state.ESPData[p] = nil
+    local t = getTarget()
+    state.target = t and t.Position or nil
+    if t and (not CFG.Aimbot.Silent or not state.hookOk) then
+        local cam = workspace.CurrentCamera
+        if cam then
+            local ok, desired = pcall(function() return CFrame.lookAt(cam.CFrame.Position, t.Position) end)
+            if ok and desired then
+                cam.CFrame = cam.CFrame:Lerp(desired, CFG.Aimbot.Smooth)
             end
-            continue
-        end
-        local pos, onScreen, depth = w2s(root.Position)
-        if not onScreen or depth > CFG.ESP.MaxDistance then
-            local d = state.ESPData[p]
-            if d then
-                d.Box.Visible = false
-                d.BoxOut.Visible = false
-                d.Name.Visible = false
-                d.Dist.Visible = false
-                d.Health.Visible = false
-                d.HealthBack.Visible = false
-                d.Tracer.Visible = false
-                d.Highlight.Enabled = false
-            end
-            continue
-        end
-        local d = state.ESPData[p]
-        if not d then
-            d = buildESP(p)
-            d.Highlight.Parent = c
-            state.ESPData[p] = d
-        end
-        d.Highlight.Enabled = CFG.ESP.Chams
-        d.Highlight.FillColor = CFG.ESP.BoxColor
-        d.Highlight.OutlineColor = CFG.ESP.BoxColor
-        d.Highlight.Adornee = c
-
-        local head = c:FindFirstChild("Head")
-        local top = head and head.Position or root.Position
-        local topPos, topOn = w2s(top + Vector3.new(0, 0.7, 0))
-        local botPos, botOn = w2s(root.Position - Vector3.new(0, 3, 0))
-
-        if topOn and botOn then
-            local height = math.abs(topPos.Y - botPos.Y)
-            local width = height * 0.5
-            local boxPos = Vector2.new(topPos.X - width / 2, topPos.Y)
-
-            if CFG.ESP.Boxes then
-                d.Box.Size = Vector2.new(width, height)
-                d.Box.Position = boxPos
-                d.Box.Color = CFG.ESP.BoxColor
-                d.Box.Visible = true
-                d.BoxOut.Size = Vector2.new(width, height)
-                d.BoxOut.Position = boxPos
-                d.BoxOut.Visible = true
-            else
-                d.Box.Visible = false
-                d.BoxOut.Visible = false
-            end
-
-            if CFG.ESP.Names then
-                d.Name.Text = p.Name .. " [" .. math.floor(h.Health) .. "hp]"
-                d.Name.Position = Vector2.new(topPos.X, topPos.Y - 20)
-                d.Name.Color = CFG.ESP.NameColor
-                d.Name.Visible = true
-            else
-                d.Name.Visible = false
-            end
-
-            if CFG.ESP.Distance then
-                d.Dist.Text = string.format("%dm", math.floor(depth))
-                d.Dist.Position = Vector2.new(topPos.X, topPos.Y + height + 2)
-                d.Dist.Color = CFG.ESP.DistColor
-                d.Dist.Visible = true
-            else
-                d.Dist.Visible = false
-            end
-
-            if CFG.ESP.Health then
-                local hp = math.clamp(h.Health / h.MaxHealth, 0, 1)
-                local bh = height * hp
-                d.Health.From = Vector2.new(boxPos.X - 8, botPos.Y - bh)
-                d.Health.To = d.Health.From + Vector2.new(0, bh)
-                d.Health.Color = CFG.ESP.HealthColor:Lerp(Color3.fromRGB(255, 0, 0), 1 - hp)
-                d.Health.Visible = true
-                d.HealthBack.From = d.Health.From - Vector2.new(0, 2)
-                d.HealthBack.To = d.Health.From + Vector2.new(0, height + 2)
-                d.HealthBack.Visible = true
-            else
-                d.Health.Visible = false
-                d.HealthBack.Visible = false
-            end
-
-            if CFG.ESP.Tracers then
-                d.Tracer.From = center
-                d.Tracer.To = pos
-                d.Tracer.Color = CFG.ESP.TracerColor
-                d.Tracer.Visible = true
-            else
-                d.Tracer.Visible = false
-            end
-        else
-            d.Box.Visible = false
-            d.BoxOut.Visible = false
-            d.Name.Visible = false
-            d.Dist.Visible = false
-            d.Health.Visible = false
-            d.HealthBack.Visible = false
-            d.Tracer.Visible = false
-            d.Highlight.Enabled = false
-        end
-    end
-
-    for p, d in pairs(state.ESPData) do
-        if not p.Parent then
-            d.Box:Remove()
-            d.BoxOut:Remove()
-            d.Name:Remove()
-            d.Dist:Remove()
-            d.Health:Remove()
-            d.HealthBack:Remove()
-            d.Tracer:Remove()
-            d.Highlight:Destroy()
-            state.ESPData[p] = nil
         end
     end
 end
 
-local fovCircle = nil
-local function updateFOV()
-    if not fovCircle then
-        fovCircle = newDrawing("Circle", {Thickness = 2, Color = CFG.UI.Accent, Filled = false, Visible = false})
+-- Silent aim hooks (fully optional)
+
+local function tryHooks()
+    local ok, mt = pcall(getrawmetatable, game)
+    if not ok or type(mt) ~= "table" then return end
+    local ok2, old = pcall(function() return mt.__namecall end)
+    if not ok2 or type(old) ~= "function" then return end
+
+    local function f(self, ...)
+        local method = nil
+        if getnamecallmethod then
+            local mOk, m = pcall(getnamecallmethod)
+            if mOk then method = m end
+        end
+        if method and state.held and state.target and CFG.Aimbot.Silent and self == workspace then
+            if method == "Raycast" or method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
+                local args = { ... }
+                local origin = args[1]
+                if typeof(origin) == "Vector3" then
+                    local dir = state.target - origin
+                    if dir.Magnitude > 0.001 then
+                        local len = 1000
+                        if typeof(args[2]) == "Vector3" then len = args[2].Magnitude end
+                        if len < 1 then len = 1000 end
+                        args[2] = dir.Unit * len
+                    end
+                end
+                return old(self, unpackFn(args))
+            end
+        end
+        return old(self, ...)
     end
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-    fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-    fovCircle.Radius = CFG.Aimbot.FOVRadius
-    fovCircle.Visible = CFG.Aimbot.Enabled
+
+    local newFn = f
+    if newcclosure then
+        pcall(function() newFn = newcclosure(f) end)
+    end
+
+    local roOk = pcall(function() setreadonly(mt, false) end)
+    local assigned = pcall(function() mt.__namecall = newFn end)
+    if roOk then pcall(function() setreadonly(mt, true) end) end
+    if assigned then state.hookOk = true end
 end
+
+-- UI
 
 local function buildUI()
+    local pGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not pGui then
+        local ok, res = pcall(function() return LocalPlayer:WaitForChild("PlayerGui", 5) end)
+        if ok then pGui = res end
+    end
+    if not pGui then return end
+
     local gui = Instance.new("ScreenGui")
-    gui.Name = "Krypton"
+    gui.Name = "KryptonUI"
     gui.ResetOnSpawn = false
-    local ok = pcall(function() gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end)
-    if not ok then return nil end
+    gui.IgnoreGuiInset = true
+    local okp = pcall(function() gui.Parent = pGui end)
+    if not okp then return end
 
     local main = Instance.new("Frame")
     main.Name = "Main"
-    main.Size = UDim2.new(0, 280, 0, 200)
-    main.Position = UDim2.new(0.5, -140, 0.5, -100)
-    main.BackgroundColor3 = CFG.UI.Background
+    main.Size = UDim2.new(0, 280, 0, 196)
+    main.Position = UDim2.new(0.5, -140, 0.5, -98)
+    main.BackgroundColor3 = CFG.UI.Bg
     main.BorderSizePixel = 0
-    main.Visible = state.UIOpen
+    main.Visible = state.open
     main.Parent = gui
-
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 12)
-    corner.Parent = main
-
-    local stroke = Instance.new("UIStroke")
+    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
+    local stroke = Instance.new("UIStroke", main)
     stroke.Color = CFG.UI.Accent
     stroke.Thickness = 2
-    stroke.Parent = main
+
+    local header = Instance.new("Frame")
+    header.Size = UDim2.new(1, 0, 0, 28)
+    header.BackgroundTransparency = 1
+    header.Parent = main
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(0, 130, 0, 20)
+    title.Position = UDim2.new(0, 8, 0, 6)
+    title.BackgroundTransparency = 1
+    title.Text = "krypton"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 18
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = header
 
     local stamp = Instance.new("TextLabel")
-    stamp.Name = "Stamp"
-    stamp.Size = UDim2.new(0, 100, 0, 20)
-    stamp.Position = UDim2.new(1, -110, 0, 5)
+    stamp.Size = UDim2.new(0, 90, 0, 16)
+    stamp.Position = UDim2.new(1, -98, 0, 7)
     stamp.BackgroundTransparency = 1
     stamp.Text = "krypton.gg"
     stamp.TextColor3 = CFG.UI.Accent
-    stamp.TextSize = 16
+    stamp.TextSize = 14
     stamp.Font = Enum.Font.GothamBold
     stamp.TextXAlignment = Enum.TextXAlignment.Right
-    stamp.Parent = main
-
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -110, 0, 24)
-    title.Position = UDim2.new(0, 8, 0, 6)
-    title.BackgroundTransparency = 1
-    title.Text = "KRYPTO N"
-    title.TextColor3 = Color3.fromRGB(255, 255, 255)
-    title.TextSize = 20
-    title.Font = Enum.Font.GothamBlack
-    title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Parent = main
+    stamp.Parent = header
 
     local content = Instance.new("Frame")
-    content.Size = UDim2.new(1, -16, 1, -44)
-    content.Position = UDim2.new(0, 8, 0, 38)
+    content.Size = UDim2.new(1, -16, 1, -34)
+    content.Position = UDim2.new(0, 8, 0, 30)
     content.BackgroundTransparency = 1
     content.Parent = main
-
-    local list = Instance.new("UIListLayout")
-    list.Padding = UDim.new(0, 6)
+    local list = Instance.new("UIListLayout", content)
+    list.Padding = UDim.new(0, 2)
     list.SortOrder = Enum.SortOrder.LayoutOrder
-    list.Parent = content
+    local pad = Instance.new("UIPadding", content)
+    pad.PaddingTop = UDim.new(0, 2)
+    pad.PaddingLeft = UDim.new(0, 2)
+    pad.PaddingRight = UDim.new(0, 2)
 
-    local pad = Instance.new("UIPadding")
-    pad.PaddingTop = UDim.new(0, 6)
-    pad.PaddingLeft = UDim.new(0, 6)
-    pad.PaddingRight = UDim.new(0, 6)
-    pad.Parent = content
-
+    local order = 0
     local function toggleRow(text, cfg, key)
-        local f = Instance.new("Frame")
-        f.Size = UDim2.new(1, 0, 0, 26)
-        f.BackgroundTransparency = 1
-        f.LayoutOrder = #content:GetChildren()
-        f.Parent = content
+        order = order + 1
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, 0, 0, 22)
+        row.BackgroundTransparency = 1
+        row.LayoutOrder = order
+        row.Parent = content
 
-        local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, -40, 1, 0)
+        local lbl = Instance.new("TextLabel", row)
+        lbl.Size = UDim2.new(1, -44, 1, 0)
         lbl.BackgroundTransparency = 1
         lbl.Text = text
-        lbl.TextColor3 = Color3.fromRGB(230, 230, 230)
+        lbl.TextColor3 = Color3.fromRGB(225, 225, 225)
         lbl.TextSize = 13
         lbl.Font = Enum.Font.Gotham
         lbl.TextXAlignment = Enum.TextXAlignment.Left
-        lbl.Parent = f
 
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 36, 0, 18)
-        btn.Position = UDim2.new(1, -36, 0.5, -9)
-        btn.BackgroundColor3 = cfg[key] and CFG.UI.Accent or Color3.fromRGB(45, 45, 55)
-        btn.Text = ""
-        btn.AutoButtonColor = false
-        btn.Parent = f
+        local sw = Instance.new("TextButton", row)
+        sw.Size = UDim2.new(0, 36, 0, 18)
+        sw.Position = UDim2.new(1, -36, 0.5, -9)
+        sw.BackgroundColor3 = cfg[key] and CFG.UI.Accent or Color3.fromRGB(45, 45, 55)
+        sw.Text = ""
+        sw.AutoButtonColor = false
+        Instance.new("UICorner", sw).CornerRadius = UDim.new(1, 0)
 
-        local btnCorner = Instance.new("UICorner")
-        btnCorner.CornerRadius = UDim.new(1, 0)
-        btnCorner.Parent = btn
-
-        local knob = Instance.new("Frame")
-        knob.Size = UDim2.new(0, 14, 0, 14)
-        knob.Position = UDim2.new(0, cfg[key] and 20 or 2, 0.5, -7)
-        knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        local knob = Instance.new("Frame", sw)
+        knob.Size = UDim2.new(0, 12, 0, 12)
+        knob.Position = UDim2.new(0, cfg[key] and 21 or 3, 0.5, -6)
+        knob.BackgroundColor3 = Color3.new(1, 1, 1)
         knob.BorderSizePixel = 0
-        knob.Parent = btn
+        Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
 
-        local knobCorner = Instance.new("UICorner")
-        knobCorner.CornerRadius = UDim.new(1, 0)
-        knobCorner.Parent = knob
-
-        local active = cfg[key]
-        btn.MouseButton1Click:Connect(function()
-            active = not active
-            cfg[key] = active
-            btn.BackgroundColor3 = active and CFG.UI.Accent or Color3.fromRGB(45, 45, 55)
-            knob.Position = UDim2.new(0, active and 20 or 2, 0.5, -7)
+        sw.MouseButton1Click:Connect(function()
+            local v = not cfg[key]
+            cfg[key] = v
+            sw.BackgroundColor3 = v and CFG.UI.Accent or Color3.fromRGB(45, 45, 55)
+            pcall(function()
+                knob:TweenPosition(UDim2.new(0, v and 21 or 3, 0.5, -6), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.12, true)
+            end)
         end)
     end
 
@@ -472,13 +533,8 @@ local function buildUI()
     toggleRow("names", CFG.ESP, "Names")
     toggleRow("tracers", CFG.ESP, "Tracers")
 
-    local dragging, dragInput, dragStart, startPos
-    local function update(input)
-        local delta = input.Position - dragStart
-        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-    end
-
-    main.InputBegan:Connect(function(input)
+    local dragging, dragStart, startPos
+    header.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = true
             dragStart = input.Position
@@ -488,69 +544,65 @@ local function buildUI()
             end)
         end
     end)
-
-    main.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement then dragInput = input end
-    end)
-
-    UserInputService.InputChanged:Connect(function(input)
-        if input == dragInput and dragging then update(input) end
-    end)
-
-    state.GUI = { Gui = gui, Main = main }
-    return gui
-end
-
-local gui = buildUI()
-
-local conns = {}
-
-table.insert(conns, UserInputService.InputBegan:Connect(function(input, processed)
-    if processed then return end
-    if input.UserInputType == Enum.UserInputType.MouseButton2 then state.MouseHeld = true end
-    if input.KeyCode == CFG.UI.ToggleKey and gui then
-        state.UIOpen = not state.UIOpen
-        if state.GUI.Main then state.GUI.Main.Visible = state.UIOpen end
-    end
-    if input.KeyCode == CFG.UI.UnloadKey then unload() end
-end))
-
-table.insert(conns, UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton2 then state.MouseHeld = false end
-end))
-
-installSilentAim()
-
-table.insert(conns, RunService.RenderStepped:Connect(function()
-    updateESP()
-    updateFOV()
-    if CFG.Aimbot.Enabled and state.MouseHeld then
-        local target = closestTarget()
-        if target then
-            state.SilentTarget = target.Position
-            if not CFG.Aimbot.Silent then aimAt(target) end
-        else
-            state.SilentTarget = nil
+    header.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - dragStart
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
-    else
-        state.SilentTarget = nil
+    end)
+
+    state.gui = { root = gui, main = main }
+end
+
+-- lifecycle
+
+local loopName = "krypton_render"
+
+local unload
+
+unload = function()
+    pcall(function() RunService:UnbindFromRenderStep(loopName) end)
+    for _, c in ipairs(state.conns) do pcall(function() c:Disconnect() end) end
+    state.conns = {}
+    for _, e in pairs(state.esps) do destroyESP(e) end
+    state.esps = {}
+    if fovCircle then pcall(function() fovCircle:Remove() end); fovCircle = nil end
+    if state.gui.root then pcall(function() state.gui.root:Destroy() end) end
+    state.gui = {}
+end
+
+local function startLoop()
+    pcall(function() RunService:UnbindFromRenderStep(loopName) end)
+    pcall(function()
+        RunService:BindToRenderStep(loopName, Enum.RenderPriority.Camera.Value + 1, function()
+            stepESP()
+            stepFOV()
+            stepAimbot()
+        end)
+    end)
+end
+
+pcall(buildUI)
+
+table.insert(state.conns, UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.UserInputType == CFG.Aimbot.Key then
+        state.held = true
+    end
+    if input.KeyCode == CFG.UI.Toggle then
+        state.open = not state.open
+        if state.gui.main then state.gui.main.Visible = state.open end
+    end
+    if input.KeyCode == CFG.UI.Unload then
+        unload()
     end
 end))
 
-function unload()
-    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-    conns = {}
-    for _, d in pairs(state.ESPData) do
-        d.Box:Remove()
-        d.BoxOut:Remove()
-        d.Name:Remove()
-        d.Dist:Remove()
-        d.Health:Remove()
-        d.HealthBack:Remove()
-        d.Tracer:Remove()
-        d.Highlight:Destroy()
+table.insert(state.conns, UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == CFG.Aimbot.Key then
+        state.held = false
     end
-    state.ESPData = {}
-    if fovCircle then remove(fovCircle); fovCircle = nil end
-    if state.GUI.Gui then destroy(state.GUI.Gui); state.GUI = {} end
-end
+end))
+
+pcall(tryHooks)
+startLoop()
