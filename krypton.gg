@@ -1,0 +1,455 @@
+--[[
+krypton.lua
+roblox executor script — aimbot + esp with ui
+target-agnostic: runs on rivals or any place
+required: executor exposing the drawing api
+controls: insert = toggle ui, right mouse = aimbot, end = unload
+--]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+local CFG = {
+    Aimbot = {
+        Enabled = true,
+        TeamCheck = true,
+        WallCheck = false,
+        Smoothness = 0.4,
+        Smooth = true,
+        FOVRadius = 140,
+        Key = Enum.UserInputType.MouseButton2,
+        Bone = "Head",
+    },
+    ESP = {
+        Enabled = true,
+        Boxes = true,
+        Names = true,
+        Distance = true,
+        Tracers = true,
+        MaxDistance = 3000,
+        Color = Color3.fromRGB(255, 20, 20),
+        NameColor = Color3.fromRGB(255, 255, 255),
+        DistanceColor = Color3.fromRGB(200, 200, 200),
+        TracerColor = Color3.fromRGB(255, 255, 255),
+    },
+    UI = {
+        ToggleKey = Enum.KeyCode.Insert,
+        UnloadKey = Enum.KeyCode.End,
+        Accent = Color3.fromRGB(0, 255, 255),
+    },
+}
+
+local state = {
+    UIOpen = true,
+    AimbotActive = false,
+    Connections = {},
+    Cache = {},
+    GUI = {},
+}
+
+local Camera = workspace.CurrentCamera
+local fovCircle = nil
+
+local function newDrawing(className, props)
+    local ok, obj = pcall(function()
+        local inst = Drawing.new(className)
+        if props then
+            for k, v in pairs(props) do inst[k] = v end
+        end
+        return inst
+    end)
+    return ok and obj or nil
+end
+
+local function removeDrawing(obj)
+    if not obj then return end
+    pcall(function() obj:Remove() end)
+end
+
+local function clearEntry(entry)
+    if not entry then return end
+    for _, obj in pairs(entry) do removeDrawing(obj) end
+end
+
+local function getRoot(char)
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart")
+end
+
+local function getBone(char, name)
+    if not char then return nil end
+    return char:FindFirstChild(name, true) or getRoot(char)
+end
+
+local function isEnemy(player)
+    if not CFG.Aimbot.TeamCheck then return true end
+    local myTeam = LocalPlayer.Team
+    local theirTeam = player.Team
+    if myTeam == nil or theirTeam == nil then return true end
+    return theirTeam ~= myTeam
+end
+
+local function worldToViewport(point)
+    local cam = workspace.CurrentCamera
+    if not cam then return nil, false, math.huge end
+    Camera = cam
+    local vp, onScreen, depth = cam:WorldToViewportPoint(point)
+    return Vector2.new(vp.X, vp.Y), onScreen, depth
+end
+
+-- ui
+
+local function buildUI()
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "Krypton"
+    gui.ResetOnSpawn = false
+    local ok = pcall(function() gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end)
+    if not ok then return nil end
+
+    local main = Instance.new("Frame")
+    main.Name = "Main"
+    main.Size = UDim2.new(0, 320, 0, 300)
+    main.Position = UDim2.new(0.5, -160, 0.5, -150)
+    main.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+    main.BorderSizePixel = 0
+    main.Visible = state.UIOpen
+    main.Parent = gui
+
+    local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 8); corner.Parent = main
+    local stroke = Instance.new("UIStroke"); stroke.Color = CFG.UI.Accent; stroke.Thickness = 1.5; stroke.Parent = main
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -40, 0, 30)
+    title.Position = UDim2.new(0, 10, 0, 6)
+    title.BackgroundTransparency = 1
+    title.Text = "krypton"
+    title.TextColor3 = CFG.UI.Accent
+    title.TextSize = 20
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = main
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 26, 0, 26)
+    closeBtn.Position = UDim2.new(1, -30, 0, 6)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    closeBtn.Text = "x"
+    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 18
+    closeBtn.Parent = main
+    local closeCorner = Instance.new("UICorner"); closeCorner.CornerRadius = UDim.new(0, 6); closeCorner.Parent = closeBtn
+
+    local tabAimbot = Instance.new("TextButton")
+    tabAimbot.Size = UDim2.new(0.5, -4, 0, 28)
+    tabAimbot.Position = UDim2.new(0, 6, 0, 42)
+    tabAimbot.BackgroundColor3 = CFG.UI.Accent
+    tabAimbot.Text = "aimbot"
+    tabAimbot.TextColor3 = Color3.fromRGB(18, 18, 18)
+    tabAimbot.Font = Enum.Font.GothamBold
+    tabAimbot.TextSize = 16
+    tabAimbot.Parent = main
+
+    local tabESP = Instance.new("TextButton")
+    tabESP.Size = UDim2.new(0.5, -4, 0, 28)
+    tabESP.Position = UDim2.new(0.5, -2, 0, 42)
+    tabESP.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+    tabESP.Text = "esp"
+    tabESP.TextColor3 = Color3.fromRGB(220, 220, 220)
+    tabESP.Font = Enum.Font.GothamBold
+    tabESP.TextSize = 16
+    tabESP.Parent = main
+
+    local container = Instance.new("Frame")
+    container.Name = "Container"
+    container.Size = UDim2.new(1, -12, 0, 220)
+    container.Position = UDim2.new(0, 6, 0, 76)
+    container.BackgroundTransparency = 1
+    container.Parent = main
+
+    local aimbotFrame = Instance.new("Frame")
+    aimbotFrame.Size = UDim2.new(1, 0, 1, 0)
+    aimbotFrame.BackgroundTransparency = 1
+    aimbotFrame.Visible = true
+    aimbotFrame.Parent = container
+
+    local espFrame = Instance.new("Frame")
+    espFrame.Size = UDim2.new(1, 0, 1, 0)
+    espFrame.BackgroundTransparency = 1
+    espFrame.Visible = false
+    espFrame.Parent = container
+
+    local function toggleBtn(parent, text, pos, startValue, onToggle)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(0, 150, 0, 24)
+        btn.Position = pos
+        btn.BackgroundColor3 = startValue and CFG.UI.Accent or Color3.fromRGB(35, 35, 35)
+        btn.Text = text .. ": " .. (startValue and "on" or "off")
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.Font = Enum.Font.Gotham
+        btn.TextSize = 14
+        btn.Parent = parent
+        local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 6); c.Parent = btn
+        local active = startValue
+        btn.MouseButton1Click:Connect(function()
+            active = not active
+            btn.BackgroundColor3 = active and CFG.UI.Accent or Color3.fromRGB(35, 35, 35)
+            btn.Text = text .. ": " .. (active and "on" or "off")
+            if onToggle then onToggle(active) end
+        end)
+        return btn
+    end
+
+    local y = 6
+    local function row(obj) obj.Position = UDim2.new(0, 6, 0, y); obj.Parent = aimbotFrame; y = y + 30 end
+    row(toggleBtn(aimbotFrame, "aimbot", UDim2.new(0, 6, 0, 6), CFG.Aimbot.Enabled, function(v) CFG.Aimbot.Enabled = v end))
+    row(toggleBtn(aimbotFrame, "team check", UDim2.new(0, 6, 0, 36), CFG.Aimbot.TeamCheck, function(v) CFG.Aimbot.TeamCheck = v end))
+    row(toggleBtn(aimbotFrame, "wall check", UDim2.new(0, 6, 0, 66), CFG.Aimbot.WallCheck, function(v) CFG.Aimbot.WallCheck = v end))
+    row(toggleBtn(aimbotFrame, "smooth aim", UDim2.new(0, 6, 0, 96), true, function(v) CFG.Aimbot.Smooth = v end))
+
+    y = 6
+    local function erow(obj) obj.Position = UDim2.new(0, 6, 0, y); obj.Parent = espFrame; y = y + 30 end
+    erow(toggleBtn(espFrame, "esp", UDim2.new(0, 6, 0, 6), CFG.ESP.Enabled, function(v) CFG.ESP.Enabled = v end))
+    erow(toggleBtn(espFrame, "boxes", UDim2.new(0, 6, 0, 36), CFG.ESP.Boxes, function(v) CFG.ESP.Boxes = v end))
+    erow(toggleBtn(espFrame, "names", UDim2.new(0, 6, 0, 66), CFG.ESP.Names, function(v) CFG.ESP.Names = v end))
+    erow(toggleBtn(espFrame, "tracers", UDim2.new(0, 6, 0, 96), CFG.ESP.Tracers, function(v) CFG.ESP.Tracers = v end))
+
+    local hint = Instance.new("TextLabel")
+    hint.Size = UDim2.new(1, -12, 0, 44)
+    hint.Position = UDim2.new(0, 6, 1, -48)
+    hint.BackgroundTransparency = 1
+    hint.Text = "insert: toggle ui\nright mouse: aimbot\nend: unload"
+    hint.TextColor3 = Color3.fromRGB(140, 140, 140)
+    hint.Font = Enum.Font.Gotham
+    hint.TextSize = 13
+    hint.TextXAlignment = Enum.TextXAlignment.Left
+    hint.TextWrapped = true
+    hint.Parent = main
+
+    tabAimbot.MouseButton1Click:Connect(function()
+        tabAimbot.BackgroundColor3 = CFG.UI.Accent; tabAimbot.TextColor3 = Color3.fromRGB(18, 18, 18)
+        tabESP.BackgroundColor3 = Color3.fromRGB(35, 35, 35); tabESP.TextColor3 = Color3.fromRGB(220, 220, 220)
+        aimbotFrame.Visible = true; espFrame.Visible = false
+    end)
+    tabESP.MouseButton1Click:Connect(function()
+        tabESP.BackgroundColor3 = CFG.UI.Accent; tabESP.TextColor3 = Color3.fromRGB(18, 18, 18)
+        tabAimbot.BackgroundColor3 = Color3.fromRGB(35, 35, 35); tabAimbot.TextColor3 = Color3.fromRGB(220, 220, 220)
+        aimbotFrame.Visible = false; espFrame.Visible = true
+    end)
+
+    local dragging, dragInput, dragStart, startPos
+    local function update(input)
+        local delta = input.Position - dragStart
+        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+    main.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true; dragStart = input.Position; startPos = main.Position
+            input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
+        end
+    end)
+    main.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then dragInput = input end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then update(input) end
+    end)
+
+    closeBtn.MouseButton1Click:Connect(function() state.UIOpen = false; main.Visible = false end)
+
+    state.GUI = {Gui = gui, Main = main}
+    return gui
+end
+
+local gui = buildUI()
+
+-- esp
+
+local function buildPlayerDrawings(player)
+    return {
+        Box = newDrawing("Square", {Thickness = 2, Filled = false, Color = CFG.ESP.Color, Visible = false}),
+        Name = newDrawing("Text", {Size = 16, Center = true, Outline = true, Color = CFG.ESP.NameColor, Visible = false}),
+        Dist = newDrawing("Text", {Size = 14, Center = true, Outline = true, Color = CFG.ESP.DistanceColor, Visible = false}),
+        Tracer = newDrawing("Line", {Thickness = 1.5, Color = CFG.ESP.TracerColor, Visible = false}),
+    }
+end
+
+local function updateESP()
+    if not CFG.ESP.Enabled then
+        for _, entry in pairs(state.Cache) do
+            for _, obj in pairs(entry) do obj.Visible = false end
+        end
+        return
+    end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    Camera = cam
+    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        if not isEnemy(player) then continue end
+        local char = player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local root = getRoot(char)
+        if not hum or hum.Health <= 0 or not root then
+            local entry = state.Cache[player]
+            if entry then
+                for _, obj in pairs(entry) do obj.Visible = false end
+                state.Cache[player] = nil
+            end
+            continue
+        end
+        local pos, onScreen, depth = worldToViewport(root.Position)
+        if not onScreen or depth > CFG.ESP.MaxDistance then
+            local entry = state.Cache[player]
+            if entry then
+                for _, obj in pairs(entry) do obj.Visible = false end
+                state.Cache[player] = nil
+            end
+            continue
+        end
+        local entry = state.Cache[player]
+        if not entry then entry = buildPlayerDrawings(player); state.Cache[player] = entry end
+        local head = char:FindFirstChild("Head")
+        local top = head and head.Position or root.Position
+        local topPos, topOn = worldToViewport(top + Vector3.new(0, 0.6, 0))
+        if topOn then
+            local scale = math.clamp(1000 / math.max(depth, 1), 0.6, 2.5)
+            local size = Vector2.new(60 * scale, 110 * scale)
+            local boxPos = topPos - size / 2
+            if CFG.ESP.Boxes then
+                entry.Box.Size = size
+                entry.Box.Position = boxPos
+                entry.Box.Color = CFG.ESP.Color
+                entry.Box.Visible = true
+            else entry.Box.Visible = false end
+            if CFG.ESP.Names then
+                entry.Name.Text = player.Name
+                entry.Name.Position = topPos + Vector2.new(0, 8)
+                entry.Name.Visible = true
+            else entry.Name.Visible = false end
+            if CFG.ESP.Distance then
+                entry.Dist.Text = string.format("%dm", math.floor(depth))
+                entry.Dist.Position = topPos + Vector2.new(0, 24)
+                entry.Dist.Visible = true
+            else entry.Dist.Visible = false end
+            if CFG.ESP.Tracers then
+                entry.Tracer.From = center
+                entry.Tracer.To = topPos
+                entry.Tracer.Visible = true
+            else entry.Tracer.Visible = false end
+        else
+            for _, obj in pairs(entry) do obj.Visible = false end
+        end
+    end
+
+    for player, entry in pairs(state.Cache) do
+        if not player.Parent then
+            clearEntry(entry)
+            state.Cache[player] = nil
+        end
+    end
+end
+
+-- fov circle
+
+local function updateFOV()
+    if not fovCircle then
+        fovCircle = newDrawing("Circle", {Thickness = 1.5, Color = Color3.fromRGB(0, 255, 255), Filled = false, Visible = false})
+    end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+    fovCircle.Radius = CFG.Aimbot.FOVRadius
+    fovCircle.Visible = CFG.Aimbot.Enabled
+end
+
+-- aimbot
+
+local function getClosestTarget()
+    local cam = workspace.CurrentCamera
+    if not cam then return nil end
+    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+    local origin = cam.CFrame.Position
+    local bestPart, bestDist = nil, math.huge
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        if not isEnemy(player) then continue end
+        local char = player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local part = getBone(char, CFG.Aimbot.Bone)
+        if not hum or hum.Health <= 0 or not part then continue end
+        local pos, onScreen, depth = worldToViewport(part.Position)
+        if not onScreen then continue end
+        local dist = (pos - center).Magnitude
+        if dist > CFG.Aimbot.FOVRadius then continue end
+        if CFG.Aimbot.WallCheck then
+            local dir = (part.Position - origin).Unit * depth
+            local result = workspace:Raycast(origin, dir)
+            if result and result.Instance and not result.Instance:IsDescendantOf(char) then continue end
+        end
+        if dist < bestDist then
+            bestDist = dist
+            bestPart = part
+        end
+    end
+    return bestPart
+end
+
+local function aimAt(part)
+    local cam = workspace.CurrentCamera
+    if not cam or not part then return end
+    local desired = CFrame.new(cam.CFrame.Position, part.Position)
+    local smooth = CFG.Aimbot.Smooth and CFG.Aimbot.Smoothness or 1
+    cam.CFrame = cam.CFrame:Lerp(desired, math.clamp(smooth, 0.05, 1))
+end
+
+-- input
+
+local function onInput(input, processed)
+    if processed then return end
+    if input.UserInputType == CFG.Aimbot.Key then
+        state.AimbotActive = true
+    end
+    if input.KeyCode == CFG.UI.ToggleKey and gui then
+        state.UIOpen = not state.UIOpen
+        if state.GUI.Main then state.GUI.Main.Visible = state.UIOpen end
+    end
+    if input.KeyCode == CFG.UI.UnloadKey then
+        unload()
+    end
+end
+
+local function onInputEnded(input)
+    if input.UserInputType == CFG.Aimbot.Key then
+        state.AimbotActive = false
+    end
+end
+
+local conns = {}
+table.insert(conns, UserInputService.InputBegan:Connect(onInput))
+table.insert(conns, UserInputService.InputEnded:Connect(onInputEnded))
+
+function unload()
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    conns = {}
+    if fovCircle then removeDrawing(fovCircle); fovCircle = nil end
+    for _, entry in pairs(state.Cache) do clearEntry(entry) end
+    state.Cache = {}
+    if state.GUI.Gui then pcall(function() state.GUI.Gui:Destroy() end) end
+    state.GUI = {}
+end
+
+-- main loop
+
+table.insert(conns, RunService.RenderStepped:Connect(function()
+    updateESP()
+    updateFOV()
+    if CFG.Aimbot.Enabled and state.AimbotActive then
+        local target = getClosestTarget()
+        if target then aimAt(target) end
+    end
+end))
