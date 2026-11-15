@@ -146,7 +146,7 @@ local CFG = {
         Enabled = false,
         Color = Color3.fromRGB(139, 92, 246),
         Transparency = 0.5,
-        Mode = "Highlight",
+        Mode = "Fill",
     },
     Misc = {
         StaffDetector = false,
@@ -677,6 +677,7 @@ local function refreshAll()
     for _, f in ipairs(state.refreshers) do
         pcall(f)
     end
+    if state.applyAccent then pcall(state.applyAccent, CFG.UI.Accent) end
     pcall(setPotato, CFG.Performance.Potato)
 end
 
@@ -974,6 +975,7 @@ local function destroyESP(e)
     if e.hp then pcall(function() e.hp:Remove() end) end
     if e.hpBack then pcall(function() e.hpBack:Remove() end) end
     if e.tracer then pcall(function() e.tracer:Remove() end) end
+    if e.dot then pcall(function() e.dot:Remove() end) end
     if e.highlight then pcall(function() e.highlight:Destroy() end) end
     if e.billboard then pcall(function() e.billboard:Destroy() end) end
     destroySkeleton(e)
@@ -1471,7 +1473,9 @@ local function stepTriggerbot()
     if now - (state.lastShot or 0) < cfg.Delay / 1000 then return end
     state.lastShot = now
     fire()
-end-- ============================================================
+end
+
+-- ============================================================
 -- PORTED SLEEPY HUB SYSTEMS
 -- hud / chams / world / movement / anti-aim + desync / staff / auto loadout
 -- ============================================================
@@ -1722,9 +1726,7 @@ local function stepChams()
     for p, ch in pairs(state.chams) do
         if not p.Parent then destroyCham(p) end
     end
-end
-
--- WORLD / LIGHTING / SKY
+end-- WORLD / LIGHTING / SKY
 
 local WORLD_PROPS = { "Brightness", "ClockTime", "FogEnd", "FogStart", "Ambient", "OutdoorAmbient", "GlobalShadows", "ExposureCompensation" }
 
@@ -1992,6 +1994,12 @@ local function stepAntiAim(dt)
     if not cam then return end
     if not cfg.AntiAim then return end
     state.antiT = (state.antiT or 0) + (dt or 0)
+
+    -- when a camera-driven aim system owns the view this frame, jittering on top of
+    -- it would corrupt the shot, so anti-aim only runs while nothing else is aiming
+    local aiming = (CFG.Aimbot.Enabled and (state.aimHeld or CFG.Aimbot.Always)) or state.silentFallback
+    if aiming then return end
+
     local amt = math.rad(math.clamp(cfg.AntiAimStrength, 0, 180))
     local roll, yaw = 0, 0
     if cfg.AntiAimMode == "Jitter" then
@@ -2013,6 +2021,8 @@ end
 
 local function stepFake(dt)
     local cfg = CFG.Exploits
+    -- own clock: anti-aim's timer only runs while anti-aim is on
+    state.fakeT = (state.fakeT or 0) + (dt or 0)
     local h = ensureHUD()
     local d = charData(LocalPlayer)
     local root = d and d.root
@@ -2070,7 +2080,7 @@ local function stepFake(dt)
         if hum.MoveDirection.Magnitude < 0.1 then
             local cam = workspace.CurrentCamera
             local perp = cam and cam.CFrame.RightVector or Vector3.new(1, 0, 0)
-            local s = math.sin((state.antiT or 0) * 22) * (0.5 + math.abs(cfg.FakeX) * 0.25)
+            local s = math.sin((state.fakeT or 0) * 22) * (0.5 + math.abs(cfg.FakeX) * 0.25)
             pcall(function()
                 root.AssemblyLinearVelocity = root.AssemblyLinearVelocity + perp * s
             end)
@@ -2423,6 +2433,12 @@ local function keyMatches(input, key)
     return input.KeyCode == key or input.UserInputType == key
 end
 
+-- enum items stringify as "Enum.KeyCode.E"; show just the readable name
+local function labelOf(v)
+    if typeof(v) == "EnumItem" then return v.Name end
+    return tostring(v)
+end
+
 local function buildUI()
     local pGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if not pGui then
@@ -2658,6 +2674,31 @@ local function buildUI()
         return order
     end
 
+    -- every widget tinted with the accent registers here so a color change
+    -- (or a config load) can repaint the whole window at once
+    state.accentParts = {}
+    local function accentBind(obj, prop)
+        table.insert(state.accentParts, { obj = obj, prop = prop })
+    end
+
+    state.applyAccent = function(c)
+        if not c then return end
+        for _, item in ipairs(state.accentParts or {}) do
+            pcall(function() item.obj[item.prop] = c end)
+        end
+        if state.gui.barGradient then
+            pcall(function()
+                state.gui.barGradient.Color = ColorSequence.new({
+                    ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 0, 0)),
+                    ColorSequenceKeypoint.new(0.5, c),
+                    ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 0, 0)),
+                })
+            end)
+        end
+    end
+
+    if titleStroke then accentBind(titleStroke, "Color") end
+
     local function addTitle(parent, text)
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1, -6, 0, 30)
@@ -2684,6 +2725,7 @@ local function buildUI()
         lbl.LayoutOrder = nextOrder()
         lbl.ZIndex = 2
         lbl.Parent = parent
+        accentBind(lbl, "TextColor3")
     end
 
     local function addCard(parent, height)
@@ -2794,6 +2836,7 @@ local function buildUI()
         val.Font = Enum.Font.GothamBold
         val.TextXAlignment = Enum.TextXAlignment.Right
         val.ZIndex = 2
+        accentBind(val, "TextColor3")
 
         local track = Instance.new("Frame", card)
         track.Size = UDim2.new(1, -24, 0, 6)
@@ -2951,12 +2994,13 @@ local function buildUI()
         btn.Size = UDim2.new(0, 150, 0, 26)
         btn.Position = UDim2.new(1, -162, 0.5, -13)
         btn.BackgroundColor3 = Color3.fromRGB(40, 32, 62)
-        btn.Text = tostring(cfg[key])
+        btn.Text = labelOf(cfg[key])
         btn.TextColor3 = CFG.UI.Accent
         btn.TextSize = 13
         btn.Font = Enum.Font.GothamBold
         btn.BorderSizePixel = 0
         btn.ZIndex = 2
+        accentBind(btn, "TextColor3")
 
         local idx = 1
         for i, v in ipairs(options) do
@@ -2965,11 +3009,11 @@ local function buildUI()
         btn.MouseButton1Click:Connect(function()
             idx = idx % #options + 1
             cfg[key] = options[idx]
-            btn.Text = tostring(cfg[key])
+            btn.Text = labelOf(cfg[key])
         end)
 
         table.insert(state.refreshers, function()
-            btn.Text = tostring(cfg[key])
+            btn.Text = labelOf(cfg[key])
         end)
     end
 
@@ -3177,6 +3221,7 @@ local function buildUI()
         if state.gui.stamp then state.gui.stamp.TextColor3 = c end
         if state.gui.toast then state.gui.toast.TextColor3 = c end
         if state.gui.toastStroke then state.gui.toastStroke.Color = c end
+        if state.applyAccent then pcall(state.applyAccent, c) end
         for name, tab in pairs(state.tabs) do
             if name == state.activeTab then
                 tab.BackgroundColor3 = c
@@ -3230,6 +3275,7 @@ local function buildUI()
         indicator.BorderSizePixel = 0
         indicator.ZIndex = 3
         indicator.Visible = false
+        accentBind(indicator, "BackgroundColor3")
 
         local icon = Instance.new("Frame", btn)
         icon.Size = UDim2.new(0, 20, 0, 20)
