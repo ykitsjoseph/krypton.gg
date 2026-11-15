@@ -65,7 +65,7 @@ local CFG = {
         Smoothness = 18,
         FOV = 200,
         MaxDistance = 3000,
-        Prediction = 0.12,
+        Prediction = 0.02,
         Sticky = true,
         Bone = "Head",
         Always = false,
@@ -344,13 +344,18 @@ end
 
 local rayParams = nil
 
-local function localVelocity()
-    local d = charData(LocalPlayer)
-    if d and d.root then
-        local v = getVelocity(d.root)
-        if v.Magnitude < 600 then return v end
-    end
-    return Vector3.new(0, 0, 0)
+-- predict where a part will be. only the target's own motion counts: subtracting our
+-- own velocity here pushed the aim point off the bone every time the player moved
+local function predictPos(part, pred)
+    local base = part.Position
+    if not pred or pred <= 0 then return base end
+    local v = getVelocity(part)
+    local speed = v.Magnitude
+    if speed < 3 or speed > 600 then return base end
+    local off = v * pred
+    -- never lead further than a hitbox is wide
+    if off.Magnitude > 3 then off = off.Unit * 3 end
+    return base + off
 end
 
 local function canSee(char, pos)
@@ -410,8 +415,8 @@ local function findTarget(o)
 
     local pred = o.prediction or 0
     if o.pingComp then pred = pred + getPing() end
-    local myVel = localVelocity()
     local resolver = (o.resolver ~= false) and CFG.Exploits.Resolver
+    local nearest = (o.bone == "Nearest")
 
     local best, bestScore = nil, math.huge
 
@@ -433,13 +438,7 @@ local function findTarget(o)
                 local threat = nil
                 for _, part in ipairs(parts) do
                     if part and (part.Transparency < 0.9 or part == d.root) then
-                        local pos = part.Position
-                        if pred > 0 then
-                            local v = getVelocity(part) - myVel
-                            if v.Magnitude < 600 then
-                                pos = pos + v * pred
-                            end
-                        end
+                        local pos = predictPos(part, pred)
 
                         local sp, depth = w2s(pos)
                         if sp and depth and depth <= o.maxDist then
@@ -469,7 +468,9 @@ local function findTarget(o)
                                             threat = threat,
                                         }
                                     end
-                                    break -- this enemy's best bone already scored
+                                    -- "nearest" scores every candidate bone, a single chosen
+                                    -- bone only needs its first passing hit
+                                    if not nearest then break end
                                 end
                             end
                         end
@@ -1223,9 +1224,9 @@ local function aimAlpha(dt, error)
     -- tighten up close to the crosshair so it finishes the snap instead of drifting
     local fov = math.max(CFG.Aimbot.FOV, 1)
     local closeness = math.clamp(1 - (error or 0) / fov, 0, 1)
-    rate = rate + closeness * closeness * 26
+    rate = rate + closeness * closeness * 44
     if rate < 0.5 then rate = 0.5 end
-    return math.clamp(1 - math.exp(-rate * (dt or 0.016)), 0.02, 1)
+    return math.clamp(1 - math.exp(-rate * (dt or 0.016)), 0.04, 1)
 end
 
 local function aimOptions(cfg)
@@ -1256,11 +1257,7 @@ local function stickyTarget()
 
     local pred = CFG.Aimbot.Prediction
     if CFG.Aimbot.PingComp then pred = pred + getPing() end
-    local pos = part.Position
-    if pred > 0 then
-        local v = getVelocity(part) - localVelocity()
-        if v.Magnitude < 600 then pos = pos + v * pred end
-    end
+    local pos = predictPos(part, pred)
 
     local sp, depth = w2s(pos)
     if not sp or not depth or depth > CFG.Aimbot.MaxDistance then return nil end
