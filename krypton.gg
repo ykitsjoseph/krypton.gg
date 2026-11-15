@@ -1,13 +1,16 @@
 --[[
 krypton.lua
-purple glass ui with animated starfield background
-tabs: aimbot / triggerbot / silent / visuals / customize
-controls: insert = toggle ui | hold aim key = aimbot + silent | hold trigger key = triggerbot | end = unload
+same 720x480 glass shell, cooler internals
+tabs: aimbot / triggerbot / silent / visuals / customize / config
+extras: potato graphics, config save/load/export/import, skeleton esp, 0 toggles ui
+controls: insert or 0 = toggle ui | hold aim key = aimbot + silent | hold trigger key = triggerbot | end = unload
 --]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 
 local BONES = { "Head", "UpperTorso", "HumanoidRootPart", "LowerTorso" }
@@ -21,17 +24,42 @@ local KEYS = {
     Enum.KeyCode.LeftShift,
 }
 
+local R15_PAIRS = {
+    { "Head", "UpperTorso" },
+    { "UpperTorso", "LowerTorso" },
+    { "UpperTorso", "LeftUpperArm" },
+    { "LeftUpperArm", "LeftLowerArm" },
+    { "LeftLowerArm", "LeftHand" },
+    { "UpperTorso", "RightUpperArm" },
+    { "RightUpperArm", "RightLowerArm" },
+    { "RightLowerArm", "RightHand" },
+    { "LowerTorso", "LeftUpperLeg" },
+    { "LeftUpperLeg", "LeftLowerLeg" },
+    { "LeftLowerLeg", "LeftFoot" },
+    { "LowerTorso", "RightUpperLeg" },
+    { "RightUpperLeg", "RightLowerLeg" },
+    { "RightLowerLeg", "RightFoot" },
+}
+
+local R6_PAIRS = {
+    { "Head", "Torso" },
+    { "Torso", "Left Arm" },
+    { "Torso", "Right Arm" },
+    { "Torso", "Left Leg" },
+    { "Torso", "Right Leg" },
+}
+
 local CFG = {
     Aimbot = {
         Enabled = true,
         TeamCheck = true,
         WallCheck = true,
         Strength = 80,
-        Smoothness = 20,
+        Smoothness = 18,
         FOV = 200,
         MaxDistance = 3000,
         Prediction = 0.12,
-        Sticky = false,
+        Sticky = true,
         Bone = "Head",
         Always = false,
         Key = Enum.UserInputType.MouseButton2,
@@ -64,11 +92,17 @@ local CFG = {
         Distance = true,
         Health = true,
         Tracers = true,
+        Skeleton = true,
         MaxDistance = 3000,
         Thickness = 2,
+        SkeletonThickness = 1,
         Color = Color3.fromRGB(139, 92, 246),
         NameColor = Color3.fromRGB(255, 255, 255),
         TracerColor = Color3.fromRGB(200, 180, 255),
+        SkeletonColor = Color3.fromRGB(235, 225, 255),
+    },
+    Performance = {
+        Potato = false,
     },
     UI = {
         Toggle = Enum.KeyCode.Insert,
@@ -92,12 +126,17 @@ local state = {
     stickyChar = nil,
     hookOk = false,
     drawingOk = false,
+    animT = 0,
     conns = {},
     esps = {},
     gui = {},
     pages = {},
     tabs = {},
+    tabIndicators = {},
     stars = {},
+    refreshers = {},
+    configName = "default",
+    statusLabel = nil,
     activeTab = "aimbot",
 }
 
@@ -163,18 +202,265 @@ local function aimPos(part, pred)
     return pos
 end
 
+-- POTATO GRAPHICS
+
+local potato = {
+    on = false,
+    effects = {},
+    shadows = nil,
+    fogEnd = nil,
+    quality = nil,
+    mesh = nil,
+    water = nil,
+}
+
+local function setPotato(on)
+    on = on and true or false
+    if on == potato.on then return end
+    potato.on = on
+
+    if on then
+        potato.effects = {}
+        for _, obj in ipairs(Lighting:GetChildren()) do
+            if obj:IsA("PostEffect") or obj:IsA("Atmosphere") or obj:IsA("Sky") then
+                potato.effects[obj] = obj.Enabled
+                pcall(function() obj.Enabled = false end)
+            end
+        end
+        potato.shadows = Lighting.GlobalShadows
+        potato.fogEnd = Lighting.FogEnd
+        pcall(function() Lighting.GlobalShadows = false end)
+        pcall(function() Lighting.FogEnd = 100000 end)
+        pcall(function()
+            local s = settings()
+            if s and s.Rendering then
+                potato.quality = s.Rendering.QualityLevel
+                s.Rendering.QualityLevel = 1
+                potato.mesh = s.Rendering.MeshPartDetail
+                s.Rendering.MeshPartDetail = 1
+            end
+        end)
+        local terrain = workspace:FindFirstChildOfClass("Terrain")
+        if terrain then
+            potato.water = { terrain.WaterWaveSize, terrain.WaterWaveSpeed, terrain.WaterReflectance, terrain.WaterTransparency }
+            pcall(function()
+                terrain.WaterWaveSize = 0
+                terrain.WaterWaveSpeed = 0
+                terrain.WaterReflectance = 0
+                terrain.WaterTransparency = 1
+            end)
+        end
+        pcall(function() setfpscap(9999) end)
+    else
+        for obj, en in pairs(potato.effects) do
+            if typeof(obj) == "Instance" and obj.Parent then
+                pcall(function() obj.Enabled = en end)
+            end
+        end
+        potato.effects = {}
+        if potato.shadows ~= nil then
+            pcall(function() Lighting.GlobalShadows = potato.shadows end)
+            potato.shadows = nil
+        end
+        if potato.fogEnd ~= nil then
+            pcall(function() Lighting.FogEnd = potato.fogEnd end)
+            potato.fogEnd = nil
+        end
+        pcall(function()
+            local s = settings()
+            if s and s.Rendering then
+                if potato.quality then s.Rendering.QualityLevel = potato.quality end
+                if potato.mesh then s.Rendering.MeshPartDetail = potato.mesh end
+            end
+        end)
+        local terrain = workspace:FindFirstChildOfClass("Terrain")
+        if terrain and potato.water then
+            pcall(function()
+                terrain.WaterWaveSize = potato.water[1]
+                terrain.WaterWaveSpeed = potato.water[2]
+                terrain.WaterReflectance = potato.water[3]
+                terrain.WaterTransparency = potato.water[4]
+            end)
+            potato.water = nil
+        end
+        pcall(function() setfpscap(60) end)
+    end
+end
+
+-- refresh plumbing
+
+local function refreshAll()
+    for _, f in ipairs(state.refreshers) do
+        pcall(f)
+    end
+    pcall(setPotato, CFG.Performance.Potato)
+end
+
+local function setStatus(text)
+    if state.statusLabel then
+        state.statusLabel.Text = text
+    end
+end
+
+-- CONFIG SERIALIZATION
+
+local CONFIG_DIR = "krypton_configs"
+
+local function encode(v)
+    local t = typeof(v)
+    if t == "Color3" then
+        return { __type = "Color3", r = v.R, g = v.G, b = v.B }
+    elseif t == "EnumItem" then
+        return { __type = "Enum", enum = tostring(v.EnumType), name = v.Name }
+    elseif t == "table" then
+        local out = {}
+        for k, val in pairs(v) do
+            out[k] = encode(val)
+        end
+        return out
+    end
+    return v
+end
+
+local function decode(v)
+    if type(v) ~= "table" then return v end
+    if v.__type == "Color3" then
+        return Color3.new(tonumber(v.r) or 0, tonumber(v.g) or 0, tonumber(v.b) or 0)
+    end
+    if v.__type == "Enum" then
+        local enumType = Enum[v.enum]
+        if enumType then
+            return enumType[v.name]
+        end
+        return nil
+    end
+    local out = {}
+    for k, val in pairs(v) do
+        if k ~= "__type" then
+            local dv = decode(val)
+            if dv ~= nil then out[k] = dv end
+        end
+    end
+    return out
+end
+
+local function applyTable(dst, src)
+    if type(dst) ~= "table" or type(src) ~= "table" then return end
+    for k, v in pairs(src) do
+        if k ~= "__type" then
+            if type(v) == "table" and type(dst[k]) == "table" then
+                applyTable(dst[k], v)
+            elseif v ~= nil then
+                dst[k] = v
+            end
+        end
+    end
+end
+
+local function fileApiOK()
+    return type(writefile) == "function" and type(readfile) == "function"
+end
+
+local function ensureDir()
+    if not fileApiOK() then return false end
+    if type(isfolder) == "function" and type(makefolder) == "function" then
+        if not isfolder(CONFIG_DIR) then
+            pcall(makefolder, CONFIG_DIR)
+        end
+        return isfolder(CONFIG_DIR)
+    end
+    return true
+end
+
+local function configPath(name)
+    return CONFIG_DIR .. "/" .. name .. ".json"
+end
+
+local function saveConfig(name)
+    if name == "" then setStatus("name required") return end
+    if not ensureDir() then setStatus("file api missing") return end
+    local ok, json = pcall(function() return HttpService:JSONEncode(encode(CFG)) end)
+    if not ok or type(json) ~= "string" then setStatus("encode failed") return end
+    local ok2 = pcall(writefile, configPath(name), json)
+    setStatus(ok2 and ("saved " .. name) or "save failed")
+end
+
+local function loadConfig(name)
+    if name == "" then setStatus("name required") return end
+    if not fileApiOK() then setStatus("file api missing") return end
+    local path = configPath(name)
+    if type(isfile) == "function" and not isfile(path) then
+        setStatus("no config " .. name)
+        return
+    end
+    local ok, data = pcall(readfile, path)
+    if not ok or type(data) ~= "string" then setStatus("read failed") return end
+    local ok2, tbl = pcall(function() return HttpService:JSONDecode(data) end)
+    if not ok2 or type(tbl) ~= "table" then setStatus("decode failed") return end
+    local ok3, decoded = pcall(decode, tbl)
+    if not ok3 or type(decoded) ~= "table" then setStatus("apply failed") return end
+    applyTable(CFG, decoded)
+    refreshAll()
+    setStatus("loaded " .. name)
+end
+
+local function deleteConfig(name)
+    if type(delfile) ~= "function" then setStatus("file api missing") return end
+    local ok = pcall(delfile, configPath(name))
+    setStatus(ok and ("deleted " .. name) or "delete failed")
+end
+
+local function exportConfig()
+    local ok, json = pcall(function() return HttpService:JSONEncode(encode(CFG)) end)
+    if not ok or type(json) ~= "string" then setStatus("encode failed") return end
+    if type(setclipboard) ~= "function" then setStatus("clipboard missing") return end
+    local ok2 = pcall(setclipboard, json)
+    setStatus(ok2 and "config copied to clipboard" or "copy failed")
+end
+
+local function importConfig()
+    if type(getclipboard) ~= "function" then setStatus("clipboard missing") return end
+    local ok, data = pcall(getclipboard)
+    if not ok or type(data) ~= "string" or data == "" then setStatus("clipboard empty") return end
+    local ok2, tbl = pcall(function() return HttpService:JSONDecode(data) end)
+    if not ok2 or type(tbl) ~= "table" then setStatus("decode failed") return end
+    local ok3, decoded = pcall(decode, tbl)
+    if not ok3 or type(decoded) ~= "table" then setStatus("apply failed") return end
+    applyTable(CFG, decoded)
+    refreshAll()
+    setStatus("config imported")
+end
+
+local function listConfigs()
+    if type(listfiles) ~= "function" then setStatus("file api missing") return end
+    local ok, files = pcall(listfiles, CONFIG_DIR)
+    if not ok or type(files) ~= "table" then setStatus("list failed") return end
+    local names = {}
+    for _, f in ipairs(files) do
+        local n = tostring(f):match("([^/\\]+)%.json$")
+        if n then table.insert(names, n) end
+    end
+    if #names == 0 then
+        setStatus("no configs saved")
+    else
+        setStatus(table.concat(names, ", "))
+    end
+end
+
 -- ESP
 
 local function makeESP(p, char)
     local e = { char = char, p = p }
     if state.drawingOk then
-        e.box = newD("Square", {Thickness = CFG.ESP.Thickness, Filled = false, Visible = false, Color = CFG.ESP.Color})
-        e.boxOut = newD("Square", {Thickness = CFG.ESP.Thickness + 2, Filled = false, Color = Color3.new(0, 0, 0), Visible = false})
-        e.name = newD("Text", {Size = 16, Center = true, Outline = true, OutlineColor = Color3.new(0, 0, 0), Visible = false, Color = CFG.ESP.NameColor})
-        e.dist = newD("Text", {Size = 14, Center = true, Outline = true, OutlineColor = Color3.new(0, 0, 0), Visible = false, Color = Color3.fromRGB(200, 200, 200)})
-        e.hp = newD("Line", {Thickness = 3, Visible = false})
-        e.hpBack = newD("Line", {Thickness = 5, Color = Color3.new(0, 0, 0), Visible = false})
-        e.tracer = newD("Line", {Thickness = 1, Visible = false, Color = CFG.ESP.TracerColor})
+        e.box = newD("Square", { Thickness = CFG.ESP.Thickness, Filled = false, Visible = false, Color = CFG.ESP.Color })
+        e.boxOut = newD("Square", { Thickness = CFG.ESP.Thickness + 2, Filled = false, Color = Color3.new(0, 0, 0), Visible = false })
+        e.name = newD("Text", { Size = 16, Center = true, Outline = true, OutlineColor = Color3.new(0, 0, 0), Visible = false, Color = CFG.ESP.NameColor })
+        e.dist = newD("Text", { Size = 14, Center = true, Outline = true, OutlineColor = Color3.new(0, 0, 0), Visible = false, Color = Color3.fromRGB(200, 200, 200) })
+        e.hp = newD("Line", { Thickness = 3, Visible = false })
+        e.hpBack = newD("Line", { Thickness = 5, Color = Color3.new(0, 0, 0), Visible = false })
+        e.tracer = newD("Line", { Thickness = 1, Visible = false, Color = CFG.ESP.TracerColor })
+        e.skel = {}
+        e.skelRig = nil
     else
         local hl = Instance.new("Highlight")
         hl.FillColor = CFG.ESP.Color
@@ -211,6 +497,60 @@ local function makeESP(p, char)
     return e
 end
 
+local function hideSkeleton(e)
+    if not e or not e.skel then return end
+    for _, l in ipairs(e.skel) do
+        if l.line then l.line.Visible = false end
+    end
+end
+
+local function destroySkeleton(e)
+    if not e or not e.skel then return end
+    for _, l in ipairs(e.skel) do
+        if l.line then pcall(function() l.line:Remove() end) end
+    end
+    e.skel = {}
+    e.skelRig = nil
+end
+
+local function updateSkeleton(e, char)
+    if not CFG.ESP.Skeleton then
+        hideSkeleton(e)
+        return
+    end
+    local rig = char:FindFirstChild("UpperTorso") and R15_PAIRS or R6_PAIRS
+    if e.skelRig ~= rig then
+        destroySkeleton(e)
+        e.skel = {}
+        for _, pair in ipairs(rig) do
+            local line = newD("Line", { Thickness = CFG.ESP.SkeletonThickness, Color = CFG.ESP.SkeletonColor, Visible = false })
+            if line then
+                table.insert(e.skel, { line = line, a = pair[1], b = pair[2] })
+            end
+        end
+        e.skelRig = rig
+    end
+    for _, l in ipairs(e.skel) do
+        local pa = char:FindFirstChild(l.a, true)
+        local pb = char:FindFirstChild(l.b, true)
+        if pa and pb then
+            local sa = w2s(pa.Position)
+            local sb = w2s(pb.Position)
+            if sa and sb then
+                l.line.From = sa
+                l.line.To = sb
+                l.line.Color = CFG.ESP.SkeletonColor
+                l.line.Thickness = CFG.ESP.SkeletonThickness
+                l.line.Visible = true
+            else
+                l.line.Visible = false
+            end
+        else
+            l.line.Visible = false
+        end
+    end
+end
+
 local function hideESP(e)
     if not e then return end
     if e.box then e.box.Visible = false end
@@ -222,6 +562,7 @@ local function hideESP(e)
     if e.tracer then e.tracer.Visible = false end
     if e.highlight then e.highlight.Enabled = false end
     if e.label then e.label.Visible = false end
+    hideSkeleton(e)
 end
 
 local function destroyESP(e)
@@ -236,6 +577,7 @@ local function destroyESP(e)
     if e.tracer then pcall(function() e.tracer:Remove() end) end
     if e.highlight then pcall(function() e.highlight:Destroy() end) end
     if e.billboard then pcall(function() e.billboard:Destroy() end) end
+    destroySkeleton(e)
 end
 
 local function getESP(p, char)
@@ -345,6 +687,8 @@ local function stepESP()
                         if e.box then e.box.Visible = false end
                         if e.boxOut then e.boxOut.Visible = false end
                     end
+
+                    updateSkeleton(e, char)
                 else
                     if e.highlight then
                         e.highlight.Enabled = true
@@ -388,7 +732,7 @@ local function stepFOV()
     local cam = workspace.CurrentCamera
     if not cam then return end
     if not fovCircle then
-        fovCircle = newD("Circle", {Thickness = 2, Filled = false, Color = CFG.UI.Accent})
+        fovCircle = newD("Circle", { Thickness = 2, Filled = false, Color = CFG.UI.Accent })
     end
     if fovCircle then
         fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
@@ -398,20 +742,20 @@ local function stepFOV()
     end
 end
 
--- Aimbot
+-- AIMBOT
 
-local function aimAlpha()
+local function aimAlpha(dt)
     local strength = math.clamp(CFG.Aimbot.Strength, 1, 100) / 100
     local smooth = math.clamp(CFG.Aimbot.Smoothness, 1, 100) / 100
-    local a = (strength ^ 1.5) * (1 - smooth * 0.8)
-    return math.clamp(a, 0.02, 1)
+    local responsiveness = (4 + strength * 46) * (1 - smooth * 0.88)
+    if responsiveness < 0.5 then responsiveness = 0.5 end
+    return math.clamp(1 - math.exp(-responsiveness * (dt or 0.016)), 0.01, 1)
 end
 
 local function pickTarget(fov, maxDist, teamCheck, bone, pred)
     local cam = workspace.CurrentCamera
     if not cam then return nil end
     local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-    local origin = cam.CFrame.Position
     local best, bestD = nil, fov
 
     for _, p in ipairs(Players:GetPlayers()) do
@@ -419,7 +763,7 @@ local function pickTarget(fov, maxDist, teamCheck, bone, pred)
             local char = p.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             local part = getPart(char, bone)
-            if hum and hum.Health > 0 and part then
+            if hum and hum.Health > 0 and part and part.Transparency < 0.95 then
                 local ap = aimPos(part, pred)
                 local sp, depth = w2s(ap)
                 if sp and depth and depth <= maxDist then
@@ -464,7 +808,7 @@ local function getTarget()
     return t
 end
 
-local function stepAimbot()
+local function stepAimbot(dt)
     if not CFG.Aimbot.Enabled then
         state.stickyPart = nil
         state.stickyChar = nil
@@ -481,13 +825,13 @@ local function stepAimbot()
         if cam then
             local ok, desired = pcall(function() return CFrame.lookAt(cam.CFrame.Position, t.pos) end)
             if ok and desired then
-                cam.CFrame = cam.CFrame:Lerp(desired, aimAlpha())
+                cam.CFrame = cam.CFrame:Lerp(desired, aimAlpha(dt))
             end
         end
     end
 end
 
--- Silent aim
+-- SILENT
 
 local function stepSilent()
     if not CFG.Silent.Enabled then
@@ -502,7 +846,7 @@ local function stepSilent()
     state.silentTarget = t and t.pos or nil
 end
 
--- Triggerbot
+-- TRIGGERBOT
 
 local function fire()
     if state.firing then return end
@@ -580,7 +924,7 @@ local function stepTriggerbot()
     end
 end
 
--- Silent aim hooks
+-- SILENT HOOKS
 
 local function tryHooks()
     local ok, mt = pcall(getrawmetatable, game)
@@ -627,23 +971,34 @@ local function tryHooks()
     if assigned then state.hookOk = true end
 end
 
--- starfield
+-- ANIMATION
 
 local function stepStars(dt)
-    if not state.stars or #state.stars == 0 then return end
-    for i = 1, #state.stars do
-        local s = state.stars[i]
-        s.y = s.y + s.sp * dt
-        if s.y > 1.02 then
-            s.y = -0.02
-            s.x = math.random()
+    state.animT = (state.animT or 0) + dt
+
+    if state.stars and #state.stars > 0 then
+        for i = 1, #state.stars do
+            local s = state.stars[i]
+            s.y = s.y + s.sp * dt
+            if s.y > 1.02 then
+                s.y = -0.02
+                s.x = math.random()
+            end
+            s.ph = s.ph + dt * s.tw
+            local twinkle = 0.5 + 0.5 * math.sin(s.ph)
+            local alpha = 0.15 + 0.6 * twinkle * s.b
+            if alpha > 1 then alpha = 1 end
+            s.fr.Position = UDim2.new(s.x, 0, s.y, 0)
+            s.fr.BackgroundTransparency = 1 - alpha
         end
-        s.ph = s.ph + dt * s.tw
-        local twinkle = 0.5 + 0.5 * math.sin(s.ph)
-        local alpha = 0.15 + 0.6 * twinkle * s.b
-        if alpha > 1 then alpha = 1 end
-        s.fr.Position = UDim2.new(s.x, 0, s.y, 0)
-        s.fr.BackgroundTransparency = 1 - alpha
+    end
+
+    if state.gui.barGradient then
+        local off = (state.animT * 0.18) % 1
+        pcall(function() state.gui.barGradient.Offset = Vector2.new(off, 0) end)
+    end
+    if state.gui.stroke then
+        pcall(function() state.gui.stroke.Transparency = 0.2 + 0.15 * math.sin(state.animT * 2) end)
     end
 end
 
@@ -707,7 +1062,7 @@ local function buildUI()
     local bgGrad = Instance.new("UIGradient", main)
     bgGrad.Rotation = 35
     bgGrad.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(38, 26, 64)),
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(42, 28, 70)),
         ColorSequenceKeypoint.new(0.55, Color3.fromRGB(18, 13, 32)),
         ColorSequenceKeypoint.new(1, Color3.fromRGB(10, 8, 18)),
     })
@@ -727,7 +1082,7 @@ local function buildUI()
     Instance.new("UICorner", starLayer).CornerRadius = UDim.new(0, 14)
 
     state.stars = {}
-    for i = 1, 80 do
+    for i = 1, 85 do
         local size = math.random(1, 3)
         local star = Instance.new("Frame")
         star.Size = UDim2.new(0, size, 0, size)
@@ -756,6 +1111,25 @@ local function buildUI()
     header.ZIndex = 3
     header.Parent = main
 
+    local accentBar = Instance.new("Frame")
+    accentBar.Size = UDim2.new(1, -20, 0, 2)
+    accentBar.Position = UDim2.new(0, 10, 0, 40)
+    accentBar.BackgroundColor3 = Color3.new(1, 1, 1)
+    accentBar.BorderSizePixel = 0
+    accentBar.ZIndex = 3
+    accentBar.Parent = main
+    local barGrad = Instance.new("UIGradient", accentBar)
+    barGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 0, 0)),
+        ColorSequenceKeypoint.new(0.5, CFG.UI.Accent),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 0, 0)),
+    })
+    barGrad.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 1),
+        NumberSequenceKeypoint.new(0.5, 0),
+        NumberSequenceKeypoint.new(1, 1),
+    })
+
     local title = Instance.new("TextLabel")
     title.Size = UDim2.new(0, 320, 0, 24)
     title.Position = UDim2.new(0, 14, 0, 8)
@@ -767,6 +1141,10 @@ local function buildUI()
     title.TextXAlignment = Enum.TextXAlignment.Left
     title.ZIndex = 3
     title.Parent = header
+    local titleStroke = Instance.new("UIStroke", title)
+    titleStroke.Color = CFG.UI.Accent
+    titleStroke.Transparency = 0.55
+    titleStroke.Thickness = 2
 
     local stamp = Instance.new("TextLabel")
     stamp.Size = UDim2.new(0, 100, 0, 18)
@@ -866,6 +1244,7 @@ local function buildUI()
     local pageSilent = makePage("silent")
     local pageVisuals = makePage("visuals")
     local pageCustom = makePage("customize")
+    local pageConfig = makePage("config")
 
     local order = 0
     local function nextOrder()
@@ -891,9 +1270,9 @@ local function buildUI()
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1, -6, 0, 18)
         lbl.BackgroundTransparency = 1
-        lbl.Text = text
+        lbl.Text = string.upper(text)
         lbl.TextColor3 = CFG.UI.Accent
-        lbl.TextSize = 13
+        lbl.TextSize = 12
         lbl.Font = Enum.Font.GothamBold
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.LayoutOrder = nextOrder()
@@ -915,6 +1294,18 @@ local function buildUI()
         st.Color = Color3.fromRGB(90, 70, 140)
         st.Transparency = 0.7
         st.Thickness = 1
+        card.MouseEnter:Connect(function()
+            pcall(function()
+                card.BackgroundTransparency = 0.02
+                st.Transparency = 0.45
+            end)
+        end)
+        card.MouseLeave:Connect(function()
+            pcall(function()
+                card.BackgroundTransparency = 0.1
+                st.Transparency = 0.7
+            end)
+        end)
         return card
     end
 
@@ -956,6 +1347,14 @@ local function buildUI()
                 knob:TweenPosition(UDim2.new(0, v and 23 or 3, 0.5, -7), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.12, true)
             end)
             if onChange then onChange(v) end
+        end)
+
+        table.insert(state.refreshers, function()
+            local v = cfg[key]
+            sw.BackgroundColor3 = v and CFG.UI.Accent or Color3.fromRGB(50, 42, 74)
+            pcall(function()
+                knob.Position = UDim2.new(0, v and 23 or 3, 0.5, -7)
+            end)
         end)
     end
 
@@ -1037,6 +1436,14 @@ local function buildUI()
                 apply(input)
             end
         end))
+
+        table.insert(state.refreshers, function()
+            local v = cfg[key]
+            local rel = math.clamp((v - minV) / (maxV - minV), 0, 1)
+            fill.Size = UDim2.new(rel, 0, 1, 0)
+            knob.Position = UDim2.new(rel, -7, 0.5, -7)
+            val.Text = tostring(v) .. (suffix or "")
+        end)
     end
 
     local function addColor(parent, text, cfg, key, onChange)
@@ -1113,6 +1520,11 @@ local function buildUI()
                 applyColor(c)
             end)
         end
+
+        table.insert(state.refreshers, function()
+            preview.BackgroundColor3 = cfg[key]
+            box.Text = toHex(cfg[key])
+        end)
     end
 
     local function addCycle(parent, text, cfg, key, options)
@@ -1148,6 +1560,58 @@ local function buildUI()
             idx = idx % #options + 1
             cfg[key] = options[idx]
             btn.Text = tostring(cfg[key])
+        end)
+
+        table.insert(state.refreshers, function()
+            btn.Text = tostring(cfg[key])
+        end)
+    end
+
+    local function addButton(parent, text, cb)
+        local card = addCard(parent, 34)
+        local btn = Instance.new("TextButton", card)
+        btn.Size = UDim2.new(1, -16, 1, -10)
+        btn.Position = UDim2.new(0, 8, 0, 5)
+        btn.BackgroundColor3 = Color3.fromRGB(58, 44, 94)
+        btn.Text = text
+        btn.TextColor3 = Color3.fromRGB(245, 240, 255)
+        btn.TextSize = 14
+        btn.Font = Enum.Font.GothamBold
+        btn.BorderSizePixel = 0
+        btn.ZIndex = 2
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+        btn.MouseButton1Click:Connect(function()
+            pcall(cb)
+        end)
+    end
+
+    local function addTextInput(parent, text, default, onChanged)
+        local card = addCard(parent, 36)
+        local lbl = Instance.new("TextLabel", card)
+        lbl.Size = UDim2.new(0, 180, 1, 0)
+        lbl.Position = UDim2.new(0, 12, 0, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text
+        lbl.TextColor3 = Color3.fromRGB(235, 230, 250)
+        lbl.TextSize = 14
+        lbl.Font = Enum.Font.Gotham
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.ZIndex = 2
+
+        local box = Instance.new("TextBox", card)
+        box.Size = UDim2.new(0, 150, 0, 24)
+        box.Position = UDim2.new(1, -162, 0.5, -12)
+        box.BackgroundColor3 = Color3.fromRGB(40, 32, 62)
+        box.TextColor3 = Color3.fromRGB(255, 255, 255)
+        box.Text = default
+        box.TextSize = 13
+        box.Font = Enum.Font.Code
+        box.ClearTextOnFocus = false
+        box.BorderSizePixel = 0
+        box.ZIndex = 2
+        Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+        box.FocusLost:Connect(function()
+            if onChanged then pcall(onChanged, box.Text) end
         end)
     end
 
@@ -1200,6 +1664,7 @@ local function buildUI()
     addSection(pageVisuals, "esp")
     addToggle(pageVisuals, "Enable ESP", CFG.ESP, "Enabled")
     addToggle(pageVisuals, "Boxes", CFG.ESP, "Boxes")
+    addToggle(pageVisuals, "Skeleton", CFG.ESP, "Skeleton")
     addToggle(pageVisuals, "Names", CFG.ESP, "Names")
     addToggle(pageVisuals, "Distance", CFG.ESP, "Distance")
     addToggle(pageVisuals, "Health Bars", CFG.ESP, "Health")
@@ -1207,6 +1672,9 @@ local function buildUI()
     addSection(pageVisuals, "layout")
     addSlider(pageVisuals, "Max Distance", CFG.ESP, "MaxDistance", 200, 6000, true, "m")
     addSlider(pageVisuals, "Box Thickness", CFG.ESP, "Thickness", 1, 6, true, "px")
+    addSlider(pageVisuals, "Skeleton Thickness", CFG.ESP, "SkeletonThickness", 1, 4, true, "px")
+    addSection(pageVisuals, "performance")
+    addToggle(pageVisuals, "Potato Graphics (FPS Boost)", CFG.Performance, "Potato", setPotato)
 
     -- CUSTOMIZE
     addTitle(pageCustom, "Customize")
@@ -1214,23 +1682,44 @@ local function buildUI()
     addColor(pageCustom, "Box Color", CFG.ESP, "Color")
     addColor(pageCustom, "Name Color", CFG.ESP, "NameColor")
     addColor(pageCustom, "Tracer Color", CFG.ESP, "TracerColor")
+    addColor(pageCustom, "Skeleton Color", CFG.ESP, "SkeletonColor")
     addColor(pageCustom, "UI Accent", CFG.UI, "Accent", function(c)
         if state.gui.stroke then state.gui.stroke.Color = c end
         if state.gui.stamp then state.gui.stamp.TextColor3 = c end
-        if state.gui.main then
-            if state.gui.main:FindFirstChildOfClass("UIStroke") then
-                state.gui.main:FindFirstChildOfClass("UIStroke").Color = c
-            end
-        end
         for name, tab in pairs(state.tabs) do
             if name == state.activeTab then
                 tab.BackgroundColor3 = c
             end
         end
     end)
-    addSection(pageCustom, "info")
-    addCard(pageCustom, 30)
-    local info = pageCustom:FindFirstChildOfClass("Frame")
+
+    -- CONFIG
+    addTitle(pageConfig, "Config")
+    addSection(pageConfig, "local configs")
+    addTextInput(pageConfig, "Config Name", state.configName, function(t)
+        state.configName = (t ~= "" and t or "default")
+    end)
+    addButton(pageConfig, "Save Config", function() saveConfig(state.configName) end)
+    addButton(pageConfig, "Load Config", function() loadConfig(state.configName) end)
+    addButton(pageConfig, "Delete Config", function() deleteConfig(state.configName) end)
+    addButton(pageConfig, "List Saved Configs", function() listConfigs() end)
+    addSection(pageConfig, "transfer")
+    addButton(pageConfig, "Export To Clipboard", function() exportConfig() end)
+    addButton(pageConfig, "Import From Clipboard", function() importConfig() end)
+    addSection(pageConfig, "status")
+    local statusCard = addCard(pageConfig, 40)
+    local statusLbl = Instance.new("TextLabel", statusCard)
+    statusLbl.Size = UDim2.new(1, -20, 1, 0)
+    statusLbl.Position = UDim2.new(0, 10, 0, 0)
+    statusLbl.BackgroundTransparency = 1
+    statusLbl.Text = "ready"
+    statusLbl.TextColor3 = Color3.fromRGB(210, 200, 235)
+    statusLbl.TextSize = 13
+    statusLbl.Font = Enum.Font.Code
+    statusLbl.TextXAlignment = Enum.TextXAlignment.Left
+    statusLbl.TextWrapped = true
+    statusLbl.ZIndex = 2
+    state.statusLabel = statusLbl
 
     local function makeTab(name, label, glyph)
         local btn = Instance.new("TextButton")
@@ -1243,6 +1732,15 @@ local function buildUI()
         btn.ZIndex = 2
         btn.Parent = sidebar
         Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+
+        local indicator = Instance.new("Frame", btn)
+        indicator.Size = UDim2.new(0, 3, 0, 16)
+        indicator.Position = UDim2.new(0, 2, 0.5, -8)
+        indicator.BackgroundColor3 = CFG.UI.Accent
+        indicator.BorderSizePixel = 0
+        indicator.ZIndex = 3
+        indicator.Visible = false
+        Instance.new("UICorner", indicator).CornerRadius = UDim.new(0, 2)
 
         local icon = Instance.new("Frame", btn)
         icon.Size = UDim2.new(0, 20, 0, 20)
@@ -1272,17 +1770,31 @@ local function buildUI()
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.ZIndex = 2
 
-        btn.MouseButton1Click:Connect(function() end)
+        btn.MouseEnter:Connect(function()
+            if state.activeTab ~= name then
+                pcall(function()
+                    btn.BackgroundTransparency = 0.15
+                end)
+            end
+        end)
+        btn.MouseLeave:Connect(function()
+            if state.activeTab ~= name then
+                pcall(function()
+                    btn.BackgroundTransparency = 0.4
+                end)
+            end
+        end)
+
         state.tabs[name] = btn
-        btn:SetAttribute("Icon", glyph)
+        state.tabIndicators[name] = indicator
     end
 
-    -- tab wiring done after because switchTab needs pages
     makeTab("aimbot", "Aimbot", "A")
     makeTab("triggerbot", "Triggerbot", "T")
     makeTab("silent", "Silent", "S")
     makeTab("visuals", "Visuals", "V")
     makeTab("customize", "Customize", "C")
+    makeTab("config", "Config", "X")
 
     local function switchTab(name)
         state.activeTab = name
@@ -1301,6 +1813,9 @@ local function buildUI()
                 local lbl = tab:FindFirstChildOfClass("TextLabel")
                 if lbl then lbl.TextColor3 = Color3.fromRGB(200, 190, 225) end
             end
+        end
+        for n, ind in pairs(state.tabIndicators) do
+            ind.Visible = (n == name)
         end
     end
 
@@ -1329,7 +1844,7 @@ local function buildUI()
         end
     end)
 
-    state.gui = { root = gui, main = main, stroke = stroke, stamp = stamp }
+    state.gui = { root = gui, main = main, stroke = stroke, stamp = stamp, barGradient = barGrad }
 end
 
 -- lifecycle
@@ -1357,7 +1872,7 @@ local function startLoop()
             stepStars(dt)
             stepESP()
             stepFOV()
-            stepAimbot()
+            stepAimbot(dt)
             stepSilent()
             stepTriggerbot()
         end)
@@ -1371,7 +1886,7 @@ table.insert(state.conns, UserInputService.InputBegan:Connect(function(input, pr
     if keyMatches(input, CFG.Aimbot.Key) then state.aimHeld = true end
     if keyMatches(input, CFG.Silent.Key) then state.silentHeld = true end
     if keyMatches(input, CFG.Triggerbot.Key) then state.trigHeld = true end
-    if input.KeyCode == CFG.UI.Toggle then
+    if input.KeyCode == CFG.UI.Toggle or input.KeyCode == Enum.KeyCode.Zero then
         state.open = not state.open
         if state.gui.main then state.gui.main.Visible = state.open end
     end
