@@ -14,6 +14,7 @@ local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 
 local BONES = { "Head", "UpperTorso", "HumanoidRootPart", "LowerTorso" }
+local PRIORITIES = { "Crosshair", "Distance", "Health" }
 local KEYS = {
     Enum.UserInputType.MouseButton1,
     Enum.UserInputType.MouseButton2,
@@ -64,16 +65,23 @@ local CFG = {
         Always = false,
         Key = Enum.UserInputType.MouseButton2,
         ShowFOV = true,
+        Priority = "Crosshair",
+        PingComp = false,
     },
     Silent = {
         Enabled = false,
         TeamCheck = true,
-        HitChance = 85,
+        WallCheck = false,
+        HitChance = 100,
         FOV = 200,
+        MaxDistance = 3000,
         Prediction = 0.1,
         Part = "Head",
         Always = false,
         Key = Enum.UserInputType.MouseButton2,
+        MaxOrigin = 30,
+        PingComp = false,
+        Fallback = true,
     },
     Triggerbot = {
         Enabled = false,
@@ -84,6 +92,7 @@ local CFG = {
         Range = 500,
         Always = false,
         Key = Enum.KeyCode.E,
+        Bone = "Head",
     },
     ESP = {
         Enabled = true,
@@ -122,11 +131,16 @@ local state = {
     trigHeld = false,
     firing = false,
     lastShot = 0,
-    silentTarget = nil,
     stickyPart = nil,
     stickyChar = nil,
     hookOk = false,
     drawingOk = false,
+    bypass = false,
+    aimTarget = nil,
+    silentPos = nil,
+    silentChar = nil,
+    silentFallback = nil,
+    trigTarget = nil,
     animT = 0,
     conns = {},
     esps = {},
@@ -181,13 +195,6 @@ local function enemyOf(p, teamCheck)
     return m ~= t
 end
 
-local function getPart(char, bone)
-    if not char then return nil end
-    local part = char:FindFirstChild(bone, true)
-    if part then return part end
-    return char:FindFirstChild("HumanoidRootPart")
-end
-
 local function getVelocity(part)
     local ok, v = pcall(function() return part.AssemblyLinearVelocity end)
     if ok and typeof(v) == "Vector3" then return v end
@@ -196,12 +203,154 @@ local function getVelocity(part)
     return Vector3.new(0, 0, 0)
 end
 
-local function aimPos(part, pred)
-    local pos = part.Position
-    if pred and pred > 0 then
-        pos = pos + getVelocity(part) * pred
+-- TARGETING CORE (shared by aimbot / silent / triggerbot)
+
+local charCache = {}
+
+local function charData(p)
+    local char = p.Character
+    if not char then
+        charCache[p] = nil
+        return nil
     end
-    return pos
+    local d = charCache[p]
+    if not d or d.char ~= char then
+        d = { char = char, bones = {} }
+        charCache[p] = d
+    end
+    if not d.hum or not d.hum.Parent then
+        d.hum = char:FindFirstChildOfClass("Humanoid")
+    end
+    if not d.root or not d.root.Parent then
+        d.root = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart")
+    end
+    if not d.head or not d.head.Parent then
+        d.head = char:FindFirstChild("Head")
+    end
+    return d
+end
+
+local function boneOf(d, bone)
+    local part = d.bones[bone]
+    if part and part.Parent then return part end
+    part = d.char:FindFirstChild(bone, true)
+    if not part then part = d.head or d.root end
+    d.bones[bone] = part
+    return part
+end
+
+local pingT, pingV = 0, 0
+
+local function getPing()
+    local now = os.clock()
+    if now - pingT < 0.5 then return pingV end
+    pingT = now
+    local ok, v = pcall(function()
+        local net = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]
+        return net:GetValue()
+    end)
+    if ok and type(v) == "number" and v > 0 then
+        pingV = math.clamp(v / 1000, 0, 0.4)
+    else
+        pingV = 0
+    end
+    return pingV
+end
+
+local rayParams = nil
+
+local function localVelocity()
+    local d = charData(LocalPlayer)
+    if d and d.root then
+        local v = getVelocity(d.root)
+        if v.Magnitude < 600 then return v end
+    end
+    return Vector3.new(0, 0, 0)
+end
+
+local function canSee(char, pos)
+    local cam = workspace.CurrentCamera
+    if not cam then return true end
+    local from = cam.CFrame.Position
+    local diff = pos - from
+    if diff.Magnitude < 0.5 then return true end
+
+    if not rayParams then
+        rayParams = RaycastParams.new()
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        rayParams.IgnoreWater = true
+    end
+    local filter = {}
+    if LocalPlayer.Character then table.insert(filter, LocalPlayer.Character) end
+    if char then table.insert(filter, char) end
+    rayParams.FilterDescendantsInstances = filter
+
+    -- our own checks must never be redirected by the silent aim hook
+    state.bypass = true
+    local ok, hit = pcall(workspace.Raycast, workspace, from, diff, rayParams)
+    state.bypass = false
+    if not ok then return true end
+    return hit == nil
+end
+
+local function findTarget(o)
+    local cam = workspace.CurrentCamera
+    if not cam then return nil end
+    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+
+    local pred = o.prediction or 0
+    if o.pingComp then pred = pred + getPing() end
+    local myVel = localVelocity()
+
+    local best, bestScore = nil, math.huge
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and enemyOf(p, o.teamCheck) then
+            local d = charData(p)
+            if d and d.hum and d.hum.Health > 0 and d.root then
+                local part = boneOf(d, o.bone)
+                if part and (part.Transparency < 0.9 or part == d.root) then
+                    local pos = part.Position
+                    if pred > 0 then
+                        local v = getVelocity(part) - myVel
+                        if v.Magnitude < 600 then
+                            pos = pos + v * pred
+                        end
+                    end
+
+                    local sp, depth = w2s(pos)
+                    if sp and depth and depth <= o.maxDist then
+                        local screenDist = (sp - center).Magnitude
+                        if screenDist <= o.fov then
+                            if not o.wallCheck or canSee(d.char, pos) then
+                                local score = screenDist
+                                if o.priority == "Distance" then
+                                    score = depth
+                                elseif o.priority == "Health" then
+                                    score = d.hum.Health
+                                end
+                                if score < bestScore then
+                                    bestScore = score
+                                    best = {
+                                        part = part,
+                                        char = d.char,
+                                        hum = d.hum,
+                                        pos = pos,
+                                        sp = sp,
+                                        depth = depth,
+                                        screenDist = screenDist,
+                                        health = d.hum.Health,
+                                    }
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return best
 end
 
 -- TOASTS
@@ -729,6 +878,15 @@ local function stepESP()
 
         local sp, depth = nil, nil
 
+        local isTarget = false
+        if char then
+            if state.aimTarget and state.aimTarget.char == char then
+                isTarget = true
+            elseif state.silentChar == char and state.silentPos then
+                isTarget = true
+            end
+        end
+
         if CFG.ESP.Enabled and char and p ~= LocalPlayer and enemyOf(p, teamCheck) then
             local hum = (e and e.hum) or char:FindFirstChildOfClass("Humanoid")
             local root = (e and e.root) or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart")
@@ -776,8 +934,8 @@ local function stepESP()
                             if CFG.ESP.Boxes then
                                 e.box.Size = Vector2.new(width, height)
                                 e.box.Position = bx
-                                e.box.Color = CFG.ESP.Color
-                                e.box.Thickness = CFG.ESP.Thickness
+                                e.box.Color = isTarget and Color3.fromRGB(120, 255, 160) or CFG.ESP.Color
+                                e.box.Thickness = isTarget and (CFG.ESP.Thickness + 1) or CFG.ESP.Thickness
                                 e.box.Visible = true
                                 if e.boxOut then
                                     e.boxOut.Size = Vector2.new(width, height)
@@ -825,7 +983,7 @@ local function stepESP()
                             if CFG.ESP.Tracers and e.tracer then
                                 e.tracer.From = center
                                 e.tracer.To = sp
-                                e.tracer.Color = CFG.ESP.TracerColor
+                                e.tracer.Color = isTarget and Color3.fromRGB(120, 255, 160) or CFG.ESP.TracerColor
                                 e.tracer.Visible = true
                             elseif e.tracer then
                                 e.tracer.Visible = false
@@ -845,10 +1003,11 @@ local function stepESP()
                                 e.hlChar = char
                                 e.highlight.Adornee = char
                             end
-                            if e.hlColor ~= CFG.ESP.Color then
-                                e.hlColor = CFG.ESP.Color
-                                e.highlight.FillColor = CFG.ESP.Color
-                                e.highlight.OutlineColor = CFG.ESP.Color
+                            local hlCol = isTarget and Color3.fromRGB(120, 255, 160) or CFG.ESP.Color
+                            if e.hlColor ~= hlCol then
+                                e.hlColor = hlCol
+                                e.highlight.FillColor = hlCol
+                                e.highlight.OutlineColor = hlCol
                             end
                         end
                         if e.label then
@@ -897,70 +1056,84 @@ local function stepFOV()
     if fovCircle then
         fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
         fovCircle.Radius = CFG.Aimbot.FOV
-        fovCircle.Color = CFG.UI.Accent
+        fovCircle.Color = state.aimTarget and Color3.fromRGB(120, 255, 160) or CFG.UI.Accent
         fovCircle.Visible = CFG.Aimbot.Enabled and CFG.Aimbot.ShowFOV
     end
 end
 
 -- AIMBOT
 
-local function aimAlpha(dt)
+local function aimAlpha(dt, error)
     local strength = math.clamp(CFG.Aimbot.Strength, 1, 100) / 100
     local smooth = math.clamp(CFG.Aimbot.Smoothness, 1, 100) / 100
-    local responsiveness = (4 + strength * 46) * (1 - smooth * 0.88)
-    if responsiveness < 0.5 then responsiveness = 0.5 end
-    return math.clamp(1 - math.exp(-responsiveness * (dt or 0.016)), 0.01, 1)
+    local rate = (6 + strength * 54) * (1 - smooth * 0.9)
+    -- tighten up close to the crosshair so it finishes the snap instead of drifting
+    local fov = math.max(CFG.Aimbot.FOV, 1)
+    local closeness = math.clamp(1 - (error or 0) / fov, 0, 1)
+    rate = rate + closeness * closeness * 26
+    if rate < 0.5 then rate = 0.5 end
+    return math.clamp(1 - math.exp(-rate * (dt or 0.016)), 0.02, 1)
 end
 
-local function pickTarget(fov, maxDist, teamCheck, bone, pred)
+local function aimOptions(cfg)
+    return {
+        fov = cfg.FOV,
+        maxDist = cfg.MaxDistance,
+        teamCheck = cfg.TeamCheck,
+        bone = cfg.Bone,
+        prediction = cfg.Prediction,
+        pingComp = cfg.PingComp,
+        wallCheck = cfg.WallCheck,
+        priority = cfg.Priority,
+    }
+end
+
+local function stickyTarget()
+    local part = state.stickyPart
+    local char = state.stickyChar
+    if not part or not char or not part.Parent or not char.Parent then return nil end
+    if not part:IsDescendantOf(char) then return nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return nil end
+
     local cam = workspace.CurrentCamera
     if not cam then return nil end
     local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-    local best, bestD = nil, fov
 
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and enemyOf(p, teamCheck) then
-            local char = p.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            local part = getPart(char, bone)
-            if hum and hum.Health > 0 and part and part.Transparency < 0.95 then
-                local ap = aimPos(part, pred)
-                local sp, depth = w2s(ap)
-                if sp and depth and depth <= maxDist then
-                    local d = (sp - center).Magnitude
-                    if d <= bestD then
-                        bestD = d
-                        best = { part = part, pos = ap, char = char }
-                    end
-                end
-            end
-        end
+    local pred = CFG.Aimbot.Prediction
+    if CFG.Aimbot.PingComp then pred = pred + getPing() end
+    local pos = part.Position
+    if pred > 0 then
+        local v = getVelocity(part) - localVelocity()
+        if v.Magnitude < 600 then pos = pos + v * pred end
     end
-    return best
+
+    local sp, depth = w2s(pos)
+    if not sp or not depth or depth > CFG.Aimbot.MaxDistance then return nil end
+    -- a little slack outside the fov before the lock drops
+    if (sp - center).Magnitude > CFG.Aimbot.FOV * 1.6 then return nil end
+    if CFG.Aimbot.WallCheck and not canSee(char, pos) then return nil end
+
+    return {
+        part = part,
+        char = char,
+        hum = hum,
+        pos = pos,
+        sp = sp,
+        depth = depth,
+        screenDist = (sp - center).Magnitude,
+        health = hum.Health,
+    }
 end
 
-local function stickyValid()
-    local char = state.stickyChar
-    local part = state.stickyPart
-    if not char or not part then return false end
-    if not char.Parent or not part.Parent then return false end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then return false end
-    if not part:IsDescendantOf(char) then return false end
-    local sp, depth = w2s(part.Position)
-    if not sp or not depth or depth > CFG.Aimbot.MaxDistance then return false end
-    return true
-end
-
-local function getTarget()
-    if CFG.Aimbot.Sticky and stickyValid() then
-        local part = state.stickyPart
-        local pos = aimPos(part, CFG.Aimbot.Prediction)
-        return { part = part, pos = pos, char = state.stickyChar }
+local function getAimbotTarget()
+    if CFG.Aimbot.Sticky then
+        local s = stickyTarget()
+        if s then return s end
     end
     state.stickyPart = nil
     state.stickyChar = nil
-    local t = pickTarget(CFG.Aimbot.FOV, CFG.Aimbot.MaxDistance, CFG.Aimbot.TeamCheck, CFG.Aimbot.Bone, CFG.Aimbot.Prediction)
+    local t = findTarget(aimOptions(CFG.Aimbot))
     if t then
         state.stickyPart = t.part
         state.stickyChar = t.char
@@ -969,119 +1142,172 @@ local function getTarget()
 end
 
 local function stepAimbot(dt)
-    if not CFG.Aimbot.Enabled then
+    if not CFG.Aimbot.Enabled or not (state.aimHeld or CFG.Aimbot.Always) then
+        state.aimTarget = nil
         state.stickyPart = nil
         state.stickyChar = nil
         return
     end
-    if not (state.aimHeld or CFG.Aimbot.Always) then
-        state.stickyPart = nil
-        state.stickyChar = nil
-        return
-    end
-    local t = getTarget()
-    if t then
-        local cam = workspace.CurrentCamera
-        if cam then
-            local ok, desired = pcall(function() return CFrame.lookAt(cam.CFrame.Position, t.pos) end)
-            if ok and desired then
-                cam.CFrame = cam.CFrame:Lerp(desired, aimAlpha(dt))
-            end
-        end
-    end
+
+    local t = getAimbotTarget()
+    state.aimTarget = t
+    if not t then return end
+
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local origin = cam.CFrame.Position
+    local to = t.pos - origin
+    if to.Magnitude < 0.05 then return end
+
+    local dir = to.Unit
+    local alpha = aimAlpha(dt, t.screenDist)
+    local newDir = cam.CFrame.LookVector:Lerp(dir, alpha)
+    if newDir.Magnitude < 0.001 then return end
+    if t.screenDist < 1.25 then newDir = dir end -- lock the last pixel instantly
+
+    cam.CFrame = CFrame.lookAt(origin, origin + newDir)
 end
 
 -- SILENT
 
+local function silentOptions()
+    local cfg = CFG.Silent
+    return {
+        fov = cfg.FOV,
+        maxDist = cfg.MaxDistance,
+        teamCheck = cfg.TeamCheck,
+        bone = cfg.Part,
+        prediction = cfg.Prediction,
+        pingComp = cfg.PingComp,
+        wallCheck = cfg.WallCheck,
+        priority = "Crosshair",
+    }
+end
+
 local function stepSilent()
-    if not CFG.Silent.Enabled then
-        state.silentTarget = nil
+    local cfg = CFG.Silent
+    if not cfg.Enabled or not (state.silentHeld or cfg.Always) then
+        state.silentPos = nil
+        state.silentChar = nil
+        state.silentFallback = nil
         return
     end
-    if not (state.silentHeld or CFG.Silent.Always) then
-        state.silentTarget = nil
-        return
+
+    local t = findTarget(silentOptions())
+    state.silentPos = t and t.pos or nil
+    state.silentChar = t and t.char or nil
+
+    -- if the executor cannot hook namecall, keep silent aim useful by aiming the camera
+    if not state.hookOk and cfg.Fallback then
+        state.silentFallback = t
+    else
+        state.silentFallback = nil
     end
-    local t = pickTarget(CFG.Silent.FOV, CFG.Aimbot.MaxDistance, CFG.Silent.TeamCheck, CFG.Silent.Part, CFG.Silent.Prediction)
-    state.silentTarget = t and t.pos or nil
+end
+
+local function stepSilentFallback(dt)
+    local t = state.silentFallback
+    if not t then return end
+    -- never fight the aimbot for the camera
+    if CFG.Aimbot.Enabled and (state.aimHeld or CFG.Aimbot.Always) then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local origin = cam.CFrame.Position
+    local to = t.pos - origin
+    if to.Magnitude < 0.05 then return end
+    local newDir = cam.CFrame.LookVector:Lerp(to.Unit, 1)
+    cam.CFrame = CFrame.lookAt(origin, origin + newDir)
 end
 
 -- TRIGGERBOT
+
+local VIM = nil
+
+local function mouseDown(down)
+    if down then
+        if type(mouse1press) == "function" then
+            if pcall(mouse1press) then return true end
+        end
+    else
+        if type(mouse1release) == "function" then
+            if pcall(mouse1release) then return true end
+        end
+    end
+    if not VIM then
+        local ok, s = pcall(function() return game:GetService("VirtualInputManager") end)
+        if ok then VIM = s end
+    end
+    if VIM then
+        return pcall(VIM.SendMouseButtonEvent, VIM, 0, 0, 0, down, game, 0)
+    end
+    return false
+end
 
 local function fire()
     if state.firing then return end
     state.firing = true
 
-    local ok = pcall(function() mouse1click() end)
-    if ok then
+    local clicked = false
+    if type(mouse1click) == "function" then
+        clicked = pcall(mouse1click)
+    end
+    if clicked then
         state.firing = false
         return
     end
 
-    local pressed = pcall(function() mouse1press() end)
-    if not pressed then
-        local VIM = game:GetService("VirtualInputManager")
-        pcall(function() VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0) end)
-    end
-    task.delay(0.05, function()
-        local released = pcall(function() mouse1release() end)
-        if not released then
-            local VIM = game:GetService("VirtualInputManager")
-            pcall(function() VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0) end)
-        end
+    mouseDown(true)
+    task.delay(0.035, function()
+        mouseDown(false)
         state.firing = false
     end)
 end
 
-local function triggerCrosshairOnEnemy()
+local function triggerTarget()
+    local cfg = CFG.Triggerbot
     local cam = workspace.CurrentCamera
-    if not cam then return false end
-
-    if CFG.Triggerbot.WallCheck then
-        local ok, res = pcall(function()
-            return workspace:Raycast(cam.CFrame.Position, cam.CFrame.LookVector * CFG.Triggerbot.Range)
-        end)
-        if ok and res and res.Instance then
-            local model = res.Instance:FindFirstAncestorOfClass("Model")
-            if model then
-                local plr = Players:GetPlayerFromCharacter(model)
-                if plr and plr ~= LocalPlayer and enemyOf(plr, CFG.Triggerbot.TeamCheck) then
-                    local hum = model:FindFirstChildOfClass("Humanoid")
-                    if hum and hum.Health > 0 then return true end
-                end
-            end
-        end
-        return false
-    end
-
+    if not cam then return nil end
     local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+
+    local best, bestDist = nil, cfg.FOV
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and enemyOf(p, CFG.Triggerbot.TeamCheck) then
-            local char = p.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            local part = getPart(char, "Head")
-            if hum and hum.Health > 0 and part then
-                local sp, depth = w2s(part.Position)
-                if sp and depth and depth <= CFG.Triggerbot.Range then
-                    if (sp - center).Magnitude <= CFG.Triggerbot.FOV then
-                        return true
+        if p ~= LocalPlayer and enemyOf(p, cfg.TeamCheck) then
+            local d = charData(p)
+            if d and d.hum and d.hum.Health > 0 and d.root then
+                local part = boneOf(d, cfg.Bone)
+                if part and (part.Transparency < 0.9 or part == d.root) then
+                    local sp, depth = w2s(part.Position)
+                    if sp and depth and depth <= cfg.Range then
+                        local screenDist = (sp - center).Magnitude
+                        if screenDist <= bestDist then
+                            if not cfg.WallCheck or canSee(d.char, part.Position) then
+                                bestDist = screenDist
+                                best = { part = part, char = d.char, hum = d.hum }
+                            end
+                        end
                     end
                 end
             end
         end
     end
-    return false
+    return best
 end
 
 local function stepTriggerbot()
-    if not CFG.Triggerbot.Enabled then return end
-    if not (state.trigHeld or CFG.Triggerbot.Always) then return end
-    local now = os.clock() * 1000
-    if now - state.lastShot < CFG.Triggerbot.Delay then return end
-    if triggerCrosshairOnEnemy() then
-        state.lastShot = now
-        fire()
+    local cfg = CFG.Triggerbot
+    if not cfg.Enabled or not (state.trigHeld or cfg.Always) then
+        state.trigTarget = nil
+        return
     end
+
+    local t = triggerTarget()
+    state.trigTarget = t
+    if not t then return end
+
+    local now = os.clock()
+    if now - (state.lastShot or 0) < cfg.Delay / 1000 then return end
+    state.lastShot = now
+    fire()
 end
 
 -- SILENT HOOKS
@@ -1093,31 +1319,65 @@ local function tryHooks()
     if not ok2 or type(old) ~= "function" then return end
 
     local function f(self, ...)
+        -- never touch our own visibility / trigger checks
+        if state.bypass then return old(self, ...) end
+
         local method = nil
         if getnamecallmethod then
             local mOk, m = pcall(getnamecallmethod)
             if mOk then method = m end
         end
-        local active = state.silentHeld or CFG.Silent.Always
-        if method and active and state.silentTarget and CFG.Silent.Enabled and self == workspace then
-            if method == "Raycast" or method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
-                if math.random(0, 99) < CFG.Silent.HitChance then
-                    local args = { ... }
-                    local origin = args[1]
-                    if typeof(origin) == "Vector3" then
-                        local dir = state.silentTarget - origin
-                        if dir.Magnitude > 0.001 then
-                            local len = 1000
-                            if typeof(args[2]) == "Vector3" then len = args[2].Magnitude end
-                            if len < 1 then len = 1000 end
-                            args[2] = dir.Unit * len
-                        end
-                    end
-                    return old(self, unpackFn(args))
-                end
-            end
+
+        local active = CFG.Silent.Enabled and (state.silentHeld or CFG.Silent.Always)
+        if not (method and active and state.silentPos and self == workspace) then
+            return old(self, ...)
         end
-        return old(self, ...)
+
+        if method ~= "Raycast" and method ~= "FindPartOnRay"
+            and method ~= "FindPartOnRayWithIgnoreList" and method ~= "FindPartOnRayWithWhitelist" then
+            return old(self, ...)
+        end
+
+        local args = { ... }
+        local cam = workspace.CurrentCamera
+        if not cam then return old(self, ...) end
+
+        local origin, dir, rayArg = nil, nil, nil
+        if typeof(args[1]) == "Ray" then
+            rayArg = args[1]
+            origin = rayArg.Origin
+            dir = rayArg.Direction
+        elseif typeof(args[1]) == "Vector3" and typeof(args[2]) == "Vector3" then
+            origin = args[1]
+            dir = args[2]
+        else
+            return old(self, ...)
+        end
+
+        local len = dir.Magnitude
+        if len < 4 then return old(self, ...) end
+
+        -- only redirect rays that are actually shots: near the camera and aimed forward
+        if (origin - cam.CFrame.Position).Magnitude > CFG.Silent.MaxOrigin then
+            return old(self, ...)
+        end
+        if cam.CFrame.LookVector:Dot(dir.Unit) < 0.5 then
+            return old(self, ...)
+        end
+        if math.random(0, 99) >= CFG.Silent.HitChance then
+            return old(self, ...)
+        end
+
+        local toTarget = state.silentPos - origin
+        if toTarget.Magnitude < 0.001 then return old(self, ...) end
+        toTarget = toTarget.Unit * math.max(len, 16)
+
+        if rayArg then
+            args[1] = Ray.new(origin, toTarget)
+        else
+            args[2] = toTarget
+        end
+        return old(self, unpackFn(args))
     end
 
     local newFn = f
@@ -1798,12 +2058,14 @@ local function buildUI()
     addToggle(pageAimbot, "Always On", CFG.Aimbot, "Always")
     addToggle(pageAimbot, "Sticky Aim", CFG.Aimbot, "Sticky")
     addToggle(pageAimbot, "Show FOV", CFG.Aimbot, "ShowFOV")
+    addToggle(pageAimbot, "Ping Compensation", CFG.Aimbot, "PingComp")
     addSection(pageAimbot, "tuning")
     addSlider(pageAimbot, "Aim Strength", CFG.Aimbot, "Strength", 1, 100, true, "%")
     addSlider(pageAimbot, "Smoothness", CFG.Aimbot, "Smoothness", 1, 100, true, "%")
     addSlider(pageAimbot, "FOV Radius", CFG.Aimbot, "FOV", 40, 600, true, "px")
     addSlider(pageAimbot, "Max Distance", CFG.Aimbot, "MaxDistance", 200, 6000, true, "m")
     addSlider(pageAimbot, "Prediction", CFG.Aimbot, "Prediction", 0, 1, false, "s")
+    addCycle(pageAimbot, "Target Priority", CFG.Aimbot, "Priority", PRIORITIES)
     addCycle(pageAimbot, "Aim Part", CFG.Aimbot, "Bone", BONES)
     addCycle(pageAimbot, "Keybind", CFG.Aimbot, "Key", KEYS)
 
@@ -1818,6 +2080,7 @@ local function buildUI()
     addSlider(pageTrigger, "Delay", CFG.Triggerbot, "Delay", 0, 1000, true, "ms")
     addSlider(pageTrigger, "FOV Radius", CFG.Triggerbot, "FOV", 5, 200, true, "px")
     addSlider(pageTrigger, "Range", CFG.Triggerbot, "Range", 50, 2000, true, "m")
+    addCycle(pageTrigger, "Target Part", CFG.Triggerbot, "Bone", BONES)
     addCycle(pageTrigger, "Keybind", CFG.Triggerbot, "Key", KEYS)
 
     -- SILENT
@@ -1825,11 +2088,15 @@ local function buildUI()
     addSection(pageSilent, "core")
     addToggle(pageSilent, "Enable", CFG.Silent, "Enabled")
     addToggle(pageSilent, "Team Check", CFG.Silent, "TeamCheck")
+    addToggle(pageSilent, "Wall Check", CFG.Silent, "WallCheck")
     addToggle(pageSilent, "Always On", CFG.Silent, "Always")
     addSection(pageSilent, "tuning")
     addSlider(pageSilent, "Hit Chance", CFG.Silent, "HitChance", 0, 100, true, "%")
     addSlider(pageSilent, "FOV Radius", CFG.Silent, "FOV", 20, 600, true, "px")
+    addSlider(pageSilent, "Max Distance", CFG.Silent, "MaxDistance", 200, 6000, true, "m")
     addSlider(pageSilent, "Prediction", CFG.Silent, "Prediction", 0, 1, false, "s")
+    addSlider(pageSilent, "Origin Range", CFG.Silent, "MaxOrigin", 5, 80, true, "m")
+    addToggle(pageSilent, "Ping Compensation", CFG.Silent, "PingComp")
     addCycle(pageSilent, "Target Part", CFG.Silent, "Part", BONES)
     addCycle(pageSilent, "Keybind", CFG.Silent, "Key", KEYS)
 
@@ -2046,10 +2313,11 @@ local function startLoop()
         -- so esp boxes/aim line up with the frame that is about to be drawn
         RunService:BindToRenderStep(loopName, Enum.RenderPriority.Last.Value - 1, function(dt)
             stepStars(dt)
-            stepESP()
-            stepFOV()
             stepAimbot(dt)
             stepSilent()
+            stepSilentFallback(dt)
+            stepFOV()
+            stepESP()
             stepTriggerbot()
         end)
     end)
