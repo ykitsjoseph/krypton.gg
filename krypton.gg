@@ -96,6 +96,7 @@ local CFG = {
         MaxDistance = 3000,
         Thickness = 2,
         SkeletonThickness = 1,
+        Sync = 0.0,
         Color = Color3.fromRGB(139, 92, 246),
         NameColor = Color3.fromRGB(255, 255, 255),
         TracerColor = Color3.fromRGB(200, 180, 255),
@@ -165,8 +166,9 @@ end
 local function w2s(pos)
     local cam = workspace.CurrentCamera
     if not cam then return nil end
-    local ok, sp, on = pcall(function() return cam:WorldToViewportPoint(pos) end)
-    if not ok or not on then return nil end
+    -- pcall with arguments (not a fresh closure) = no per-call garbage
+    local ok, sp = pcall(cam.WorldToViewportPoint, cam, pos)
+    if not ok or not sp then return nil end
     if sp.Z <= 0 then return nil end
     return Vector2.new(sp.X, sp.Y), sp.Z
 end
@@ -202,17 +204,67 @@ local function aimPos(part, pred)
     return pos
 end
 
+-- TOASTS
+
+local function notify(text, color)
+    local gui = state.gui
+    state.toastId = (state.toastId or 0) + 1
+    local myId = state.toastId
+    if gui and gui.toast then
+        gui.toast.Text = text
+        gui.toast.TextColor3 = color or CFG.UI.Accent
+        gui.toast.Visible = true
+        task.delay(2.2, function()
+            if state.toastId == myId and gui.toast then
+                gui.toast.Visible = false
+            end
+        end)
+    end
+end
+
 -- POTATO GRAPHICS
 
 local potato = {
     on = false,
     effects = {},
-    shadows = nil,
-    fogEnd = nil,
+    worldFx = {},
+    lighting = {},
     quality = nil,
     mesh = nil,
-    water = nil,
+    savedQuality = nil,
+    terrain = nil,
+    deco = nil,
+    fpscap = 60,
 }
+
+local POTATO_LIGHT = {
+    GlobalShadows = false,
+    ShadowSoftness = 0,
+    EnvironmentDiffuseScale = 0,
+    EnvironmentSpecularScale = 0,
+    FogEnd = 1000000,
+}
+
+local function potatoSweep(on)
+    if on then
+        potato.worldFx = {}
+        local list = workspace:GetDescendants()
+        for i = 1, #list do
+            if not potato.on then return end
+            local d = list[i]
+            if d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Beam")
+                or d:IsA("Smoke") or d:IsA("Fire") or d:IsA("Sparkles") then
+                potato.worldFx[d] = d.Enabled
+                pcall(function() d.Enabled = false end)
+            end
+        end
+    else
+        for d, en in pairs(potato.worldFx) do
+            if d.Parent then pcall(function() d.Enabled = en end) end
+        end
+        potato.worldFx = {}
+    end
+end
 
 local function setPotato(on)
     on = on and true or false
@@ -220,17 +272,29 @@ local function setPotato(on)
     potato.on = on
 
     if on then
+        -- lighting / shadows / fog
+        potato.lighting = {}
+        for prop, val in pairs(POTATO_LIGHT) do
+            local ok, old = pcall(function() return Lighting[prop] end)
+            if ok and old ~= nil then
+                potato.lighting[prop] = old
+                pcall(function() Lighting[prop] = val end)
+            end
+        end
+
+        -- post processing, atmosphere, sky
         potato.effects = {}
         for _, obj in ipairs(Lighting:GetChildren()) do
             if obj:IsA("PostEffect") or obj:IsA("Atmosphere") or obj:IsA("Sky") then
-                potato.effects[obj] = obj.Enabled
-                pcall(function() obj.Enabled = false end)
+                local ok, en = pcall(function() return obj.Enabled end)
+                if ok then
+                    potato.effects[obj] = en
+                    pcall(function() obj.Enabled = false end)
+                end
             end
         end
-        potato.shadows = Lighting.GlobalShadows
-        potato.fogEnd = Lighting.FogEnd
-        pcall(function() Lighting.GlobalShadows = false end)
-        pcall(function() Lighting.FogEnd = 100000 end)
+
+        -- renderer quality (may be locked by the game, attempted anyway)
         pcall(function()
             local s = settings()
             if s and s.Rendering then
@@ -240,32 +304,57 @@ local function setPotato(on)
                 s.Rendering.MeshPartDetail = 1
             end
         end)
+        pcall(function()
+            local ugs
+            if type(UserSettings) == "function" then
+                ugs = UserSettings():GetService("UserGameSettings")
+            else
+                ugs = game:GetService("UserSettings"):GetService("UserGameSettings")
+            end
+            if ugs then
+                potato.savedQuality = ugs.SavedQualityLevel
+                ugs.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel1
+            end
+        end)
+
+        -- terrain water / decoration
         local terrain = workspace:FindFirstChildOfClass("Terrain")
         if terrain then
-            potato.water = { terrain.WaterWaveSize, terrain.WaterWaveSpeed, terrain.WaterReflectance, terrain.WaterTransparency }
+            potato.terrain = { terrain.WaterWaveSize, terrain.WaterWaveSpeed, terrain.WaterReflectance, terrain.WaterTransparency }
             pcall(function()
                 terrain.WaterWaveSize = 0
                 terrain.WaterWaveSpeed = 0
                 terrain.WaterReflectance = 0
                 terrain.WaterTransparency = 1
             end)
+            local ok, deco = pcall(function() return terrain.Decoration end)
+            if ok then
+                potato.deco = deco
+                pcall(function() terrain.Decoration = false end)
+            end
         end
-        pcall(function() setfpscap(9999) end)
+
+        pcall(function()
+            if type(getfpscap) == "function" then potato.fpscap = getfpscap() end
+            setfpscap(9999)
+        end)
+
+        -- particles/beams/trails sweep is heavy, keep it off the UI thread
+        task.spawn(function() pcall(potatoSweep, true) end)
+        notify("potato graphics: ON", Color3.fromRGB(120, 255, 160))
     else
+        for prop, old in pairs(potato.lighting) do
+            pcall(function() Lighting[prop] = old end)
+        end
+        potato.lighting = {}
+
         for obj, en in pairs(potato.effects) do
             if typeof(obj) == "Instance" and obj.Parent then
                 pcall(function() obj.Enabled = en end)
             end
         end
         potato.effects = {}
-        if potato.shadows ~= nil then
-            pcall(function() Lighting.GlobalShadows = potato.shadows end)
-            potato.shadows = nil
-        end
-        if potato.fogEnd ~= nil then
-            pcall(function() Lighting.FogEnd = potato.fogEnd end)
-            potato.fogEnd = nil
-        end
+
         pcall(function()
             local s = settings()
             if s and s.Rendering then
@@ -273,17 +362,34 @@ local function setPotato(on)
                 if potato.mesh then s.Rendering.MeshPartDetail = potato.mesh end
             end
         end)
+        pcall(function()
+            local ugs
+            if type(UserSettings) == "function" then
+                ugs = UserSettings():GetService("UserGameSettings")
+            else
+                ugs = game:GetService("UserSettings"):GetService("UserGameSettings")
+            end
+            if ugs and potato.savedQuality ~= nil then ugs.SavedQualityLevel = potato.savedQuality end
+        end)
+
         local terrain = workspace:FindFirstChildOfClass("Terrain")
-        if terrain and potato.water then
+        if terrain and potato.terrain then
             pcall(function()
-                terrain.WaterWaveSize = potato.water[1]
-                terrain.WaterWaveSpeed = potato.water[2]
-                terrain.WaterReflectance = potato.water[3]
-                terrain.WaterTransparency = potato.water[4]
+                terrain.WaterWaveSize = potato.terrain[1]
+                terrain.WaterWaveSpeed = potato.terrain[2]
+                terrain.WaterReflectance = potato.terrain[3]
+                terrain.WaterTransparency = potato.terrain[4]
             end)
-            potato.water = nil
+            potato.terrain = nil
+            if potato.deco ~= nil then
+                pcall(function() terrain.Decoration = potato.deco end)
+                potato.deco = nil
+            end
         end
-        pcall(function() setfpscap(60) end)
+
+        pcall(potatoSweep, false)
+        pcall(setfpscap, potato.fpscap or 60)
+        notify("potato graphics: OFF", Color3.fromRGB(255, 160, 160))
     end
 end
 
@@ -451,6 +557,11 @@ end
 
 local function makeESP(p, char)
     local e = { char = char, p = p }
+    -- cached character refs (avoids per-frame recursive searches)
+    e.hum = char:FindFirstChildOfClass("Humanoid")
+    e.head = char:FindFirstChild("Head")
+    e.root = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart")
+    e.vel = Vector3.new(0, 0, 0)
     if state.drawingOk then
         e.box = newD("Square", { Thickness = CFG.ESP.Thickness, Filled = false, Visible = false, Color = CFG.ESP.Color })
         e.boxOut = newD("Square", { Thickness = CFG.ESP.Thickness + 2, Filled = false, Color = Color3.new(0, 0, 0), Visible = false })
@@ -525,14 +636,22 @@ local function updateSkeleton(e, char)
         for _, pair in ipairs(rig) do
             local line = newD("Line", { Thickness = CFG.ESP.SkeletonThickness, Color = CFG.ESP.SkeletonColor, Visible = false })
             if line then
-                table.insert(e.skel, { line = line, a = pair[1], b = pair[2] })
+                -- resolve bone parts once per rig instead of every frame
+                table.insert(e.skel, {
+                    line = line,
+                    a = pair[1],
+                    b = pair[2],
+                    pa = char:FindFirstChild(pair[1], true),
+                    pb = char:FindFirstChild(pair[2], true),
+                })
             end
         end
         e.skelRig = rig
     end
     for _, l in ipairs(e.skel) do
-        local pa = char:FindFirstChild(l.a, true)
-        local pb = char:FindFirstChild(l.b, true)
+        if not l.pa or not l.pa.Parent then l.pa = char:FindFirstChild(l.a, true) end
+        if not l.pb or not l.pb.Parent then l.pb = char:FindFirstChild(l.b, true) end
+        local pa, pb = l.pa, l.pb
         if pa and pb then
             local sa = w2s(pa.Position)
             local sb = w2s(pb.Position)
@@ -593,125 +712,166 @@ local function stepESP()
     local cam = workspace.CurrentCamera
     if not cam then return end
     local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+    local sync = CFG.ESP.Sync or 0
+    local maxDist = CFG.ESP.MaxDistance
+    local teamCheck = CFG.Aimbot.TeamCheck
 
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and enemyOf(p, CFG.Aimbot.TeamCheck) then
-            local char = p.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            local root = char and (char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart"))
-            local visible = CFG.ESP.Enabled and hum ~= nil and hum.Health > 0 and root ~= nil
-            local sp, depth = nil, nil
+        local e = state.esps[p]
+        local char = p.Character
 
-            if visible then
-                sp, depth = w2s(root.Position)
-                if sp == nil or depth == nil or depth > CFG.ESP.MaxDistance then
-                    visible = false
-                end
+        -- character swapped or despawned -> flush stale overlay immediately
+        if e and e.char ~= char then
+            destroyESP(e)
+            state.esps[p] = nil
+            e = nil
+        end
+
+        local sp, depth = nil, nil
+
+        if CFG.ESP.Enabled and char and p ~= LocalPlayer and enemyOf(p, teamCheck) then
+            local hum = (e and e.hum) or char:FindFirstChildOfClass("Humanoid")
+            local root = (e and e.root) or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart")
+            if hum and not hum.Parent then hum = char:FindFirstChildOfClass("Humanoid") end
+            if root and not root.Parent then
+                root = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart")
             end
 
-            local e = state.esps[p]
+            if hum and root and hum.Health > 0 then
+                if not e then
+                    e = getESP(p, char)
+                end
+                e.hum, e.root = hum, root
+                if not e.head or not e.head.Parent then e.head = char:FindFirstChild("Head") end
 
-            if visible then
-                e = getESP(p, char)
+                -- optional velocity sync to hide replication delay
+                local offset = Vector3.new(0, 0, 0)
+                if sync > 0 then
+                    local ok, v = pcall(function() return root.AssemblyLinearVelocity end)
+                    if ok and typeof(v) == "Vector3" and v.Magnitude < 600 then
+                        e.vel = e.vel:Lerp(v, 0.5)
+                        offset = e.vel * sync
+                    end
+                end
 
-                if state.drawingOk then
-                    local head = char:FindFirstChild("Head")
-                    local topPos = nil
-                    if head then topPos = w2s(head.Position + Vector3.new(0, 0.7, 0)) end
-                    local botPos = w2s(root.Position - Vector3.new(0, 3, 0))
+                local rootPos = root.Position + offset
+                sp, depth = w2s(rootPos)
+                if sp == nil or depth == nil or depth > maxDist then
+                    sp, depth = nil, nil
+                end
 
-                    if topPos and botPos and e.box then
-                        local height = math.abs(topPos.Y - botPos.Y)
-                        if height < 6 then height = 6 end
-                        local width = height * 0.5
-                        local bx = Vector2.new(topPos.X - width / 2, topPos.Y)
+                if sp then
+                    if state.drawingOk then
+                        local head = e.head
+                        local topPos = nil
+                        if head then topPos = w2s(head.Position + offset + Vector3.new(0, 0.7, 0)) end
+                        local botPos = w2s(rootPos - Vector3.new(0, 3, 0))
 
-                        if CFG.ESP.Boxes then
-                            e.box.Size = Vector2.new(width, height)
-                            e.box.Position = bx
-                            e.box.Color = CFG.ESP.Color
-                            e.box.Thickness = CFG.ESP.Thickness
-                            e.box.Visible = true
-                            if e.boxOut then
-                                e.boxOut.Size = Vector2.new(width, height)
-                                e.boxOut.Position = bx
-                                e.boxOut.Thickness = CFG.ESP.Thickness + 2
-                                e.boxOut.Visible = true
+                        if topPos and botPos and e.box then
+                            local height = math.abs(topPos.Y - botPos.Y)
+                            if height < 6 then height = 6 end
+                            local width = height * 0.5
+                            local bx = Vector2.new(topPos.X - width / 2, topPos.Y)
+
+                            if CFG.ESP.Boxes then
+                                e.box.Size = Vector2.new(width, height)
+                                e.box.Position = bx
+                                e.box.Color = CFG.ESP.Color
+                                e.box.Thickness = CFG.ESP.Thickness
+                                e.box.Visible = true
+                                if e.boxOut then
+                                    e.boxOut.Size = Vector2.new(width, height)
+                                    e.boxOut.Position = bx
+                                    e.boxOut.Thickness = CFG.ESP.Thickness + 2
+                                    e.boxOut.Visible = true
+                                end
+                            else
+                                e.box.Visible = false
+                                if e.boxOut then e.boxOut.Visible = false end
+                            end
+
+                            if CFG.ESP.Names and e.name then
+                                e.name.Text = p.Name
+                                e.name.Position = Vector2.new(topPos.X, topPos.Y - 18)
+                                e.name.Color = CFG.ESP.NameColor
+                                e.name.Visible = true
+                            elseif e.name then
+                                e.name.Visible = false
+                            end
+
+                            if CFG.ESP.Distance and e.dist then
+                                e.dist.Text = string.format("%dm", math.floor(depth))
+                                e.dist.Position = Vector2.new(topPos.X, topPos.Y + height + 2)
+                                e.dist.Visible = true
+                            elseif e.dist then
+                                e.dist.Visible = false
+                            end
+
+                            if CFG.ESP.Health and e.hp and e.hpBack then
+                                local ratio = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                                local bh = height * ratio
+                                e.hp.From = Vector2.new(bx.X - 8, botPos.Y - bh)
+                                e.hp.To = Vector2.new(bx.X - 8, botPos.Y)
+                                e.hp.Color = Color3.fromRGB(0, 255, 0):Lerp(Color3.fromRGB(255, 0, 0), 1 - ratio)
+                                e.hp.Visible = true
+                                e.hpBack.From = Vector2.new(bx.X - 9, botPos.Y - height - 1)
+                                e.hpBack.To = Vector2.new(bx.X - 9, botPos.Y + 1)
+                                e.hpBack.Visible = true
+                            else
+                                if e.hp then e.hp.Visible = false end
+                                if e.hpBack then e.hpBack.Visible = false end
+                            end
+
+                            if CFG.ESP.Tracers and e.tracer then
+                                e.tracer.From = center
+                                e.tracer.To = sp
+                                e.tracer.Color = CFG.ESP.TracerColor
+                                e.tracer.Visible = true
+                            elseif e.tracer then
+                                e.tracer.Visible = false
                             end
                         else
-                            e.box.Visible = false
+                            if e.box then e.box.Visible = false end
                             if e.boxOut then e.boxOut.Visible = false end
                         end
 
-                        if CFG.ESP.Names and e.name then
-                            e.name.Text = p.Name
-                            e.name.Position = Vector2.new(topPos.X, topPos.Y - 18)
-                            e.name.Color = CFG.ESP.NameColor
-                            e.name.Visible = true
-                        elseif e.name then
-                            e.name.Visible = false
-                        end
-
-                        if CFG.ESP.Distance and e.dist then
-                            e.dist.Text = string.format("%dm", math.floor(depth))
-                            e.dist.Position = Vector2.new(topPos.X, topPos.Y + height + 2)
-                            e.dist.Visible = true
-                        elseif e.dist then
-                            e.dist.Visible = false
-                        end
-
-                        if CFG.ESP.Health and e.hp and e.hpBack then
-                            local ratio = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-                            local bh = height * ratio
-                            e.hp.From = Vector2.new(bx.X - 8, botPos.Y - bh)
-                            e.hp.To = Vector2.new(bx.X - 8, botPos.Y)
-                            e.hp.Color = Color3.fromRGB(0, 255, 0):Lerp(Color3.fromRGB(255, 0, 0), 1 - ratio)
-                            e.hp.Visible = true
-                            e.hpBack.From = Vector2.new(bx.X - 9, botPos.Y - height - 1)
-                            e.hpBack.To = Vector2.new(bx.X - 9, botPos.Y + 1)
-                            e.hpBack.Visible = true
-                        else
-                            if e.hp then e.hp.Visible = false end
-                            if e.hpBack then e.hpBack.Visible = false end
-                        end
-
-                        if CFG.ESP.Tracers and e.tracer then
-                            e.tracer.From = center
-                            e.tracer.To = sp
-                            e.tracer.Color = CFG.ESP.TracerColor
-                            e.tracer.Visible = true
-                        elseif e.tracer then
-                            e.tracer.Visible = false
-                        end
+                        updateSkeleton(e, char)
                     else
-                        if e.box then e.box.Visible = false end
-                        if e.boxOut then e.boxOut.Visible = false end
+                        if e.highlight then
+                            -- only re-write properties when they actually change:
+                            -- reassigning Adornee every frame makes Highlight re-register
+                            if not e.highlight.Enabled then e.highlight.Enabled = true end
+                            if e.hlChar ~= char then
+                                e.hlChar = char
+                                e.highlight.Adornee = char
+                            end
+                            if e.hlColor ~= CFG.ESP.Color then
+                                e.hlColor = CFG.ESP.Color
+                                e.highlight.FillColor = CFG.ESP.Color
+                                e.highlight.OutlineColor = CFG.ESP.Color
+                            end
+                        end
+                        if e.label then
+                            local parts = { p.Name }
+                            if CFG.ESP.Distance and depth then
+                                table.insert(parts, string.format("%dm", math.floor(depth)))
+                            end
+                            if CFG.ESP.Health and hum then
+                                table.insert(parts, math.floor(hum.Health) .. "hp")
+                            end
+                            e.label.Text = table.concat(parts, " | ")
+                            e.label.TextColor3 = CFG.ESP.NameColor
+                            e.label.Visible = CFG.ESP.Names or CFG.ESP.Distance or CFG.ESP.Health
+                        end
                     end
-
-                    updateSkeleton(e, char)
                 else
-                    if e.highlight then
-                        e.highlight.Enabled = true
-                        e.highlight.Adornee = char
-                        e.highlight.FillColor = CFG.ESP.Color
-                        e.highlight.OutlineColor = CFG.ESP.Color
-                    end
-                    if e.label then
-                        local parts = { p.Name }
-                        if CFG.ESP.Distance and depth then
-                            table.insert(parts, string.format("%dm", math.floor(depth)))
-                        end
-                        if CFG.ESP.Health and hum then
-                            table.insert(parts, math.floor(hum.Health) .. "hp")
-                        end
-                        e.label.Text = table.concat(parts, " | ")
-                        e.label.TextColor3 = CFG.ESP.NameColor
-                        e.label.Visible = CFG.ESP.Names or CFG.ESP.Distance or CFG.ESP.Health
-                    end
+                    if e then hideESP(e) end
                 end
             else
                 if e then hideESP(e) end
             end
+        elseif e then
+            hideESP(e)
         end
     end
 
@@ -976,6 +1136,9 @@ end
 local function stepStars(dt)
     state.animT = (state.animT or 0) + dt
 
+    -- skip all starfield work while the window is hidden
+    if not state.open then return end
+
     if state.stars and #state.stars > 0 then
         for i = 1, #state.stars do
             local s = state.stars[i]
@@ -1057,7 +1220,6 @@ local function buildUI()
     main.BorderSizePixel = 0
     main.Visible = state.open
     main.Parent = gui
-    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 14)
 
     local bgGrad = Instance.new("UIGradient", main)
     bgGrad.Rotation = 35
@@ -1072,6 +1234,25 @@ local function buildUI()
     stroke.Thickness = 1.5
     stroke.Transparency = 0.2
 
+    local toast = Instance.new("TextLabel")
+    toast.Name = "Toast"
+    toast.Size = UDim2.new(0, 240, 0, 26)
+    toast.Position = UDim2.new(0.5, -120, 1, -36)
+    toast.BackgroundColor3 = Color3.fromRGB(22, 17, 38)
+    toast.BackgroundTransparency = 0.08
+    toast.BorderSizePixel = 0
+    toast.Font = Enum.Font.GothamBold
+    toast.Text = ""
+    toast.TextSize = 13
+    toast.TextColor3 = CFG.UI.Accent
+    toast.Visible = false
+    toast.ZIndex = 20
+    toast.Parent = main
+    local toastStroke = Instance.new("UIStroke", toast)
+    toastStroke.Color = CFG.UI.Accent
+    toastStroke.Thickness = 1
+    toastStroke.Transparency = 0.4
+
     local starLayer = Instance.new("Frame")
     starLayer.Name = "Stars"
     starLayer.Size = UDim2.new(1, 0, 1, 0)
@@ -1079,7 +1260,6 @@ local function buildUI()
     starLayer.ClipsDescendants = true
     starLayer.ZIndex = 1
     starLayer.Parent = main
-    Instance.new("UICorner", starLayer).CornerRadius = UDim.new(0, 14)
 
     state.stars = {}
     for i = 1, 85 do
@@ -1090,7 +1270,6 @@ local function buildUI()
         star.BorderSizePixel = 0
         star.ZIndex = 1
         star.Parent = starLayer
-        Instance.new("UICorner", star).CornerRadius = UDim.new(1, 0)
 
         local data = {
             fr = star,
@@ -1170,7 +1349,6 @@ local function buildUI()
         b.BorderSizePixel = 0
         b.ZIndex = 3
         b.Parent = header
-        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
         b.MouseButton1Click:Connect(cb)
         return b
     end
@@ -1193,7 +1371,6 @@ local function buildUI()
     sidebar.BorderSizePixel = 0
     sidebar.ZIndex = 2
     sidebar.Parent = main
-    Instance.new("UICorner", sidebar).CornerRadius = UDim.new(0, 10)
 
     local sideList = Instance.new("UIListLayout", sidebar)
     sideList.Padding = UDim.new(0, 4)
@@ -1222,7 +1399,6 @@ local function buildUI()
         page.Visible = false
         page.ZIndex = 2
         page.Parent = content
-        Instance.new("UICorner", page).CornerRadius = UDim.new(0, 10)
         local list = Instance.new("UIListLayout", page)
         list.Padding = UDim.new(0, 6)
         list.SortOrder = Enum.SortOrder.LayoutOrder
@@ -1289,7 +1465,6 @@ local function buildUI()
         card.LayoutOrder = nextOrder()
         card.ZIndex = 2
         card.Parent = parent
-        Instance.new("UICorner", card).CornerRadius = UDim.new(0, 8)
         local st = Instance.new("UIStroke", card)
         st.Color = Color3.fromRGB(90, 70, 140)
         st.Transparency = 0.7
@@ -1329,7 +1504,6 @@ local function buildUI()
         sw.Text = ""
         sw.AutoButtonColor = false
         sw.ZIndex = 2
-        Instance.new("UICorner", sw).CornerRadius = UDim.new(1, 0)
 
         local knob = Instance.new("Frame", sw)
         knob.Size = UDim2.new(0, 14, 0, 14)
@@ -1337,17 +1511,26 @@ local function buildUI()
         knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
         knob.BorderSizePixel = 0
         knob.ZIndex = 2
-        Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
 
-        sw.MouseButton1Click:Connect(function()
+        local function trigger()
             local v = not cfg[key]
             cfg[key] = v
             sw.BackgroundColor3 = v and CFG.UI.Accent or Color3.fromRGB(50, 42, 74)
             pcall(function()
                 knob:TweenPosition(UDim2.new(0, v and 23 or 3, 0.5, -7), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.12, true)
             end)
-            if onChange then onChange(v) end
-        end)
+            if onChange then pcall(onChange, v) end
+        end
+
+        -- invisible full-row hitbox: clicking anywhere on the row flips the toggle
+        local hit = Instance.new("TextButton")
+        hit.Size = UDim2.new(1, 0, 1, 0)
+        hit.BackgroundTransparency = 1
+        hit.Text = ""
+        hit.AutoButtonColor = false
+        hit.ZIndex = 30
+        hit.Parent = card
+        hit.MouseButton1Click:Connect(trigger)
 
         table.insert(state.refreshers, function()
             local v = cfg[key]
@@ -1388,14 +1571,12 @@ local function buildUI()
         track.BackgroundColor3 = Color3.fromRGB(50, 42, 74)
         track.BorderSizePixel = 0
         track.ZIndex = 2
-        Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
 
         local fill = Instance.new("Frame", track)
         fill.Size = UDim2.new((cfg[key] - minV) / (maxV - minV), 0, 1, 0)
         fill.BackgroundColor3 = CFG.UI.Accent
         fill.BorderSizePixel = 0
         fill.ZIndex = 2
-        Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
 
         local knob = Instance.new("Frame", track)
         knob.Size = UDim2.new(0, 14, 0, 14)
@@ -1403,7 +1584,6 @@ local function buildUI()
         knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
         knob.BorderSizePixel = 0
         knob.ZIndex = 2
-        Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
 
         local dragging = false
         local function apply(input)
@@ -1465,7 +1645,6 @@ local function buildUI()
         preview.BackgroundColor3 = cfg[key]
         preview.BorderSizePixel = 0
         preview.ZIndex = 2
-        Instance.new("UICorner", preview).CornerRadius = UDim.new(0, 4)
 
         local box = Instance.new("TextBox", card)
         box.Size = UDim2.new(0, 128, 0, 24)
@@ -1479,7 +1658,6 @@ local function buildUI()
         box.ClearTextOnFocus = false
         box.BorderSizePixel = 0
         box.ZIndex = 2
-        Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
 
         local function applyColor(c)
             cfg[key] = c
@@ -1515,7 +1693,6 @@ local function buildUI()
             sw.AutoButtonColor = false
             sw.LayoutOrder = i
             sw.ZIndex = 2
-            Instance.new("UICorner", sw).CornerRadius = UDim.new(0, 4)
             sw.MouseButton1Click:Connect(function()
                 applyColor(c)
             end)
@@ -1550,7 +1727,6 @@ local function buildUI()
         btn.Font = Enum.Font.GothamBold
         btn.BorderSizePixel = 0
         btn.ZIndex = 2
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
 
         local idx = 1
         for i, v in ipairs(options) do
@@ -1579,7 +1755,6 @@ local function buildUI()
         btn.Font = Enum.Font.GothamBold
         btn.BorderSizePixel = 0
         btn.ZIndex = 2
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
         btn.MouseButton1Click:Connect(function()
             pcall(cb)
         end)
@@ -1609,7 +1784,6 @@ local function buildUI()
         box.ClearTextOnFocus = false
         box.BorderSizePixel = 0
         box.ZIndex = 2
-        Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
         box.FocusLost:Connect(function()
             if onChanged then pcall(onChanged, box.Text) end
         end)
@@ -1671,6 +1845,7 @@ local function buildUI()
     addToggle(pageVisuals, "Tracers", CFG.ESP, "Tracers")
     addSection(pageVisuals, "layout")
     addSlider(pageVisuals, "Max Distance", CFG.ESP, "MaxDistance", 200, 6000, true, "m")
+    addSlider(pageVisuals, "Sync Prediction", CFG.ESP, "Sync", 0, 0.3, false, "s")
     addSlider(pageVisuals, "Box Thickness", CFG.ESP, "Thickness", 1, 6, true, "px")
     addSlider(pageVisuals, "Skeleton Thickness", CFG.ESP, "SkeletonThickness", 1, 4, true, "px")
     addSection(pageVisuals, "performance")
@@ -1686,6 +1861,8 @@ local function buildUI()
     addColor(pageCustom, "UI Accent", CFG.UI, "Accent", function(c)
         if state.gui.stroke then state.gui.stroke.Color = c end
         if state.gui.stamp then state.gui.stamp.TextColor3 = c end
+        if state.gui.toast then state.gui.toast.TextColor3 = c end
+        if state.gui.toastStroke then state.gui.toastStroke.Color = c end
         for name, tab in pairs(state.tabs) do
             if name == state.activeTab then
                 tab.BackgroundColor3 = c
@@ -1731,7 +1908,6 @@ local function buildUI()
         btn.LayoutOrder = #state.tabs + 1
         btn.ZIndex = 2
         btn.Parent = sidebar
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
 
         local indicator = Instance.new("Frame", btn)
         indicator.Size = UDim2.new(0, 3, 0, 16)
@@ -1740,7 +1916,6 @@ local function buildUI()
         indicator.BorderSizePixel = 0
         indicator.ZIndex = 3
         indicator.Visible = false
-        Instance.new("UICorner", indicator).CornerRadius = UDim.new(0, 2)
 
         local icon = Instance.new("Frame", btn)
         icon.Size = UDim2.new(0, 20, 0, 20)
@@ -1748,7 +1923,6 @@ local function buildUI()
         icon.BackgroundColor3 = Color3.fromRGB(50, 42, 74)
         icon.BorderSizePixel = 0
         icon.ZIndex = 2
-        Instance.new("UICorner", icon).CornerRadius = UDim.new(0, 5)
 
         local iconTxt = Instance.new("TextLabel", icon)
         iconTxt.Size = UDim2.new(1, 0, 1, 0)
@@ -1844,7 +2018,7 @@ local function buildUI()
         end
     end)
 
-    state.gui = { root = gui, main = main, stroke = stroke, stamp = stamp, barGradient = barGrad }
+    state.gui = { root = gui, main = main, stroke = stroke, stamp = stamp, barGradient = barGrad, toast = toast, toastStroke = toastStroke }
 end
 
 -- lifecycle
@@ -1868,7 +2042,9 @@ end
 local function startLoop()
     pcall(function() RunService:UnbindFromRenderStep(loopName) end)
     pcall(function()
-        RunService:BindToRenderStep(loopName, Enum.RenderPriority.Camera.Value + 1, function(dt)
+        -- last priority: sample camera + parts AFTER every game script has moved them,
+        -- so esp boxes/aim line up with the frame that is about to be drawn
+        RunService:BindToRenderStep(loopName, Enum.RenderPriority.Last.Value - 1, function(dt)
             stepStars(dt)
             stepESP()
             stepFOV()
