@@ -1,9 +1,9 @@
 --[[
 krypton.lua
-small rectangle ui, aimbot, esp, silent aim
-executor: loadstring(game:HttpGet("URL"))()
-controls: insert = toggle ui | right mouse = aimbot / silent aim | end = unload
-every executor-specific call is pcall'd; the render loop connects no matter what
+big rectangle ui — tabs: aimbot / esp / customize
+aimbot knobs: strength, fov, prediction, max distance, bone, always aim
+esp: boxes, names, distance, health, tracers, box thickness, colors from ui
+controls: insert = toggle ui | right mouse = aimbot (or always aim) | end = unload
 --]]
 
 local Players = game:GetService("Players")
@@ -11,16 +11,22 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 
+local BONES = { "Head", "UpperTorso", "HumanoidRootPart", "LowerTorso" }
+
 local CFG = {
     Aimbot = {
         Enabled = true,
         Silent = false,
         TeamCheck = true,
         WallCheck = false,
-        Smooth = 0.25,
-        FOV = 160,
+        FOV = 200,
+        MaxDistance = 3000,
+        Strength = 80,
+        Prediction = 0.12,
         Bone = "Head",
+        Hold = true,
         Key = Enum.UserInputType.MouseButton2,
+        ShowFOV = true,
     },
     ESP = {
         Enabled = true,
@@ -30,13 +36,17 @@ local CFG = {
         Health = true,
         Tracers = true,
         MaxDistance = 3000,
+        Thickness = 2,
         Color = Color3.fromRGB(0, 255, 255),
+        NameColor = Color3.fromRGB(255, 255, 255),
+        TracerColor = Color3.fromRGB(255, 255, 255),
     },
     UI = {
         Toggle = Enum.KeyCode.Insert,
         Unload = Enum.KeyCode.End,
         Accent = Color3.fromRGB(0, 255, 255),
         Bg = Color3.fromRGB(12, 12, 16),
+        Panel = Color3.fromRGB(22, 22, 30),
     },
 }
 
@@ -49,6 +59,9 @@ local state = {
     conns = {},
     esps = {},
     gui = {},
+    pages = {},
+    tabs = {},
+    activeTab = "aimbot",
 }
 
 local unpackFn = table.unpack or unpack
@@ -90,18 +103,33 @@ local function isEnemy(p)
     return m ~= t
 end
 
+local function getPart(char, bone)
+    if not char then return nil end
+    local part = char:FindFirstChild(bone, true)
+    if part then return part end
+    return char:FindFirstChild("HumanoidRootPart")
+end
+
+local function getVelocity(part)
+    local ok, v = pcall(function() return part.AssemblyLinearVelocity end)
+    if ok and typeof(v) == "Vector3" then return v end
+    local ok2, v2 = pcall(function() return part.Velocity end)
+    if ok2 and typeof(v2) == "Vector3" then return v2 end
+    return Vector3.new(0, 0, 0)
+end
+
 -- ESP
 
 local function makeESP(p, char)
     local e = { char = char, p = p }
     if state.drawingOk then
-        e.box = newD("Square", {Thickness = 2, Filled = false, Visible = false})
-        e.boxOut = newD("Square", {Thickness = 4, Filled = false, Color = Color3.new(0, 0, 0), Visible = false})
-        e.name = newD("Text", {Size = 16, Center = true, Outline = true, OutlineColor = Color3.new(0, 0, 0), Visible = false})
-        e.dist = newD("Text", {Size = 14, Center = true, Outline = true, OutlineColor = Color3.new(0, 0, 0), Visible = false})
+        e.box = newD("Square", {Thickness = CFG.ESP.Thickness, Filled = false, Visible = false, Color = CFG.ESP.Color})
+        e.boxOut = newD("Square", {Thickness = CFG.ESP.Thickness + 2, Filled = false, Color = Color3.new(0, 0, 0), Visible = false})
+        e.name = newD("Text", {Size = 16, Center = true, Outline = true, OutlineColor = Color3.new(0, 0, 0), Visible = false, Color = CFG.ESP.NameColor})
+        e.dist = newD("Text", {Size = 14, Center = true, Outline = true, OutlineColor = Color3.new(0, 0, 0), Visible = false, Color = Color3.fromRGB(200, 200, 200)})
         e.hp = newD("Line", {Thickness = 3, Visible = false})
         e.hpBack = newD("Line", {Thickness = 5, Color = Color3.new(0, 0, 0), Visible = false})
-        e.tracer = newD("Line", {Thickness = 1, Visible = false})
+        e.tracer = newD("Line", {Thickness = 1, Visible = false, Color = CFG.ESP.TracerColor})
     else
         local hl = Instance.new("Highlight")
         hl.FillColor = CFG.ESP.Color
@@ -116,7 +144,7 @@ local function makeESP(p, char)
         if head then
             local bb = Instance.new("BillboardGui")
             bb.Name = "KryptonTag"
-            bb.Size = UDim2.new(0, 140, 0, 30)
+            bb.Size = UDim2.new(0, 160, 0, 30)
             bb.StudsOffset = Vector3.new(0, 2.2, 0)
             bb.AlwaysOnTop = true
             bb.ResetOnSpawn = false
@@ -124,7 +152,7 @@ local function makeESP(p, char)
             local lbl = Instance.new("TextLabel")
             lbl.Size = UDim2.new(1, 0, 1, 0)
             lbl.BackgroundTransparency = 1
-            lbl.TextColor3 = Color3.new(1, 1, 1)
+            lbl.TextColor3 = CFG.ESP.NameColor
             lbl.TextStrokeTransparency = 0
             lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
             lbl.Font = Enum.Font.Code
@@ -216,10 +244,12 @@ local function stepESP()
                             e.box.Size = Vector2.new(width, height)
                             e.box.Position = bx
                             e.box.Color = CFG.ESP.Color
+                            e.box.Thickness = CFG.ESP.Thickness
                             e.box.Visible = true
                             if e.boxOut then
                                 e.boxOut.Size = Vector2.new(width, height)
                                 e.boxOut.Position = bx
+                                e.boxOut.Thickness = CFG.ESP.Thickness + 2
                                 e.boxOut.Visible = true
                             end
                         else
@@ -230,7 +260,7 @@ local function stepESP()
                         if CFG.ESP.Names and e.name then
                             e.name.Text = p.Name
                             e.name.Position = Vector2.new(topPos.X, topPos.Y - 18)
-                            e.name.Color = Color3.new(1, 1, 1)
+                            e.name.Color = CFG.ESP.NameColor
                             e.name.Visible = true
                         elseif e.name then
                             e.name.Visible = false
@@ -239,7 +269,6 @@ local function stepESP()
                         if CFG.ESP.Distance and e.dist then
                             e.dist.Text = string.format("%dm", math.floor(depth))
                             e.dist.Position = Vector2.new(topPos.X, topPos.Y + height + 2)
-                            e.dist.Color = Color3.fromRGB(200, 200, 200)
                             e.dist.Visible = true
                         elseif e.dist then
                             e.dist.Visible = false
@@ -263,7 +292,7 @@ local function stepESP()
                         if CFG.ESP.Tracers and e.tracer then
                             e.tracer.From = center
                             e.tracer.To = sp
-                            e.tracer.Color = Color3.new(1, 1, 1)
+                            e.tracer.Color = CFG.ESP.TracerColor
                             e.tracer.Visible = true
                         elseif e.tracer then
                             e.tracer.Visible = false
@@ -288,6 +317,7 @@ local function stepESP()
                             table.insert(parts, math.floor(hum.Health) .. "hp")
                         end
                         e.label.Text = table.concat(parts, " | ")
+                        e.label.TextColor3 = CFG.ESP.NameColor
                         e.label.Visible = CFG.ESP.Names or CFG.ESP.Distance or CFG.ESP.Health
                     end
                 end
@@ -319,30 +349,56 @@ local function stepFOV()
     if fovCircle then
         fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
         fovCircle.Radius = CFG.Aimbot.FOV
-        fovCircle.Visible = CFG.Aimbot.Enabled
+        fovCircle.Color = CFG.UI.Accent
+        fovCircle.Visible = CFG.Aimbot.Enabled and CFG.Aimbot.ShowFOV
     end
 end
 
 -- Aimbot
 
+local function aimAlpha()
+    local s = math.clamp(CFG.Aimbot.Strength, 1, 100) / 100
+    return math.clamp(s * s * 0.92 + 0.08, 0.02, 1)
+end
+
+local function getAimPoint(part)
+    local pos = part.Position
+    local pred = math.clamp(CFG.Aimbot.Prediction, 0, 1)
+    if pred > 0 then
+        pos = pos + getVelocity(part) * pred
+    end
+    return pos
+end
+
 local function getTarget()
     local cam = workspace.CurrentCamera
     if not cam then return nil end
     local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+    local origin = cam.CFrame.Position
     local best, bestD = nil, CFG.Aimbot.FOV
 
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer and isEnemy(p) then
             local char = p.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
-            local part = char and (char:FindFirstChild(CFG.Aimbot.Bone, true) or char:FindFirstChild("HumanoidRootPart"))
+            local part = getPart(char, CFG.Aimbot.Bone)
             if hum and hum.Health > 0 and part then
-                local sp, depth = w2s(part.Position)
-                if sp and depth and depth <= CFG.ESP.MaxDistance then
+                local aimPos = getAimPoint(part)
+                local sp, depth = w2s(aimPos)
+                if sp and depth and depth <= CFG.Aimbot.MaxDistance then
                     local d = (sp - center).Magnitude
                     if d <= bestD then
-                        bestD = d
-                        best = part
+                        if CFG.Aimbot.WallCheck then
+                            local dir = (aimPos - origin).Unit * depth
+                            local ok, res = pcall(function() return workspace:Raycast(origin, dir) end)
+                            if ok and res and res.Instance and not res.Instance:IsDescendantOf(char) then
+                                d = nil
+                            end
+                        end
+                        if d and d <= bestD then
+                            bestD = d
+                            best = { part = part, pos = aimPos }
+                        end
                     end
                 end
             end
@@ -352,24 +408,28 @@ local function getTarget()
 end
 
 local function stepAimbot()
-    if not (CFG.Aimbot.Enabled and state.held) then
+    if not CFG.Aimbot.Enabled then
+        state.target = nil
+        return
+    end
+    if CFG.Aimbot.Hold and not state.held then
         state.target = nil
         return
     end
     local t = getTarget()
-    state.target = t and t.Position or nil
+    state.target = t and t.pos or nil
     if t and (not CFG.Aimbot.Silent or not state.hookOk) then
         local cam = workspace.CurrentCamera
         if cam then
-            local ok, desired = pcall(function() return CFrame.lookAt(cam.CFrame.Position, t.Position) end)
+            local ok, desired = pcall(function() return CFrame.lookAt(cam.CFrame.Position, t.pos) end)
             if ok and desired then
-                cam.CFrame = cam.CFrame:Lerp(desired, CFG.Aimbot.Smooth)
+                cam.CFrame = cam.CFrame:Lerp(desired, aimAlpha())
             end
         end
     end
 end
 
--- Silent aim hooks (fully optional)
+-- Silent aim hooks
 
 local function tryHooks()
     local ok, mt = pcall(getrawmetatable, game)
@@ -383,7 +443,8 @@ local function tryHooks()
             local mOk, m = pcall(getnamecallmethod)
             if mOk then method = m end
         end
-        if method and state.held and state.target and CFG.Aimbot.Silent and self == workspace then
+        local active = state.held or (not CFG.Aimbot.Hold)
+        if method and active and state.target and CFG.Aimbot.Silent and self == workspace then
             if method == "Raycast" or method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
                 local args = { ... }
                 local origin = args[1]
@@ -415,6 +476,32 @@ end
 
 -- UI
 
+local function parseHex(str)
+    if type(str) ~= "string" then return nil end
+    str = str:gsub("#", "")
+    if #str ~= 6 then return nil end
+    local r = tonumber(str:sub(1, 2), 16)
+    local g = tonumber(str:sub(3, 4), 16)
+    local b = tonumber(str:sub(5, 6), 16)
+    if not r or not g or not b then return nil end
+    return Color3.fromRGB(r, g, b)
+end
+
+local function toHex(c)
+    return string.format("#%02X%02X%02X", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+end
+
+local SWATCHES = {
+    Color3.fromRGB(0, 255, 255),
+    Color3.fromRGB(255, 60, 60),
+    Color3.fromRGB(60, 255, 120),
+    Color3.fromRGB(255, 220, 60),
+    Color3.fromRGB(255, 60, 255),
+    Color3.fromRGB(255, 140, 40),
+    Color3.fromRGB(140, 90, 255),
+    Color3.fromRGB(255, 255, 255),
+}
+
 local function buildUI()
     local pGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if not pGui then
@@ -432,78 +519,139 @@ local function buildUI()
 
     local main = Instance.new("Frame")
     main.Name = "Main"
-    main.Size = UDim2.new(0, 280, 0, 196)
-    main.Position = UDim2.new(0.5, -140, 0.5, -98)
+    main.Size = UDim2.new(0, 560, 0, 430)
+    main.Position = UDim2.new(0.5, -280, 0.5, -215)
     main.BackgroundColor3 = CFG.UI.Bg
     main.BorderSizePixel = 0
     main.Visible = state.open
     main.Parent = gui
-    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
+    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
     local stroke = Instance.new("UIStroke", main)
     stroke.Color = CFG.UI.Accent
     stroke.Thickness = 2
 
     local header = Instance.new("Frame")
-    header.Size = UDim2.new(1, 0, 0, 28)
-    header.BackgroundTransparency = 1
+    header.Size = UDim2.new(1, 0, 0, 36)
+    header.BackgroundColor3 = CFG.UI.Panel
+    header.BorderSizePixel = 0
     header.Parent = main
+    local hc = Instance.new("UICorner", header)
+    hc.CornerRadius = UDim.new(0, 12)
 
     local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(0, 130, 0, 20)
-    title.Position = UDim2.new(0, 8, 0, 6)
+    title.Size = UDim2.new(0, 200, 0, 22)
+    title.Position = UDim2.new(0, 12, 0, 7)
     title.BackgroundTransparency = 1
     title.Text = "krypton"
     title.TextColor3 = Color3.fromRGB(255, 255, 255)
-    title.TextSize = 18
+    title.TextSize = 20
     title.Font = Enum.Font.GothamBold
     title.TextXAlignment = Enum.TextXAlignment.Left
     title.Parent = header
 
     local stamp = Instance.new("TextLabel")
-    stamp.Size = UDim2.new(0, 90, 0, 16)
-    stamp.Position = UDim2.new(1, -98, 0, 7)
+    stamp.Size = UDim2.new(0, 110, 0, 20)
+    stamp.Position = UDim2.new(1, -122, 0, 8)
     stamp.BackgroundTransparency = 1
     stamp.Text = "krypton.gg"
     stamp.TextColor3 = CFG.UI.Accent
-    stamp.TextSize = 14
+    stamp.TextSize = 15
     stamp.Font = Enum.Font.GothamBold
     stamp.TextXAlignment = Enum.TextXAlignment.Right
     stamp.Parent = header
 
+    local tabBar = Instance.new("Frame")
+    tabBar.Size = UDim2.new(1, -16, 0, 34)
+    tabBar.Position = UDim2.new(0, 8, 0, 42)
+    tabBar.BackgroundColor3 = CFG.UI.Panel
+    tabBar.BorderSizePixel = 0
+    tabBar.Parent = main
+    Instance.new("UICorner", tabBar).CornerRadius = UDim.new(0, 8)
+
+    local tabList = Instance.new("UIListLayout", tabBar)
+    tabList.FillDirection = Enum.FillDirection.Horizontal
+    tabList.Padding = UDim.new(0, 4)
+    tabList.SortOrder = Enum.SortOrder.LayoutOrder
+    local tabPad = Instance.new("UIPadding", tabBar)
+    tabPad.PaddingLeft = UDim.new(0, 4)
+    tabPad.PaddingTop = UDim.new(0, 4)
+
     local content = Instance.new("Frame")
-    content.Size = UDim2.new(1, -16, 1, -34)
-    content.Position = UDim2.new(0, 8, 0, 30)
+    content.Size = UDim2.new(1, -16, 1, -84)
+    content.Position = UDim2.new(0, 8, 0, 80)
     content.BackgroundTransparency = 1
     content.Parent = main
-    local list = Instance.new("UIListLayout", content)
-    list.Padding = UDim.new(0, 2)
-    list.SortOrder = Enum.SortOrder.LayoutOrder
-    local pad = Instance.new("UIPadding", content)
-    pad.PaddingTop = UDim.new(0, 2)
-    pad.PaddingLeft = UDim.new(0, 2)
-    pad.PaddingRight = UDim.new(0, 2)
+
+    local function makePage(name)
+        local page = Instance.new("ScrollingFrame")
+        page.Name = name
+        page.Size = UDim2.new(1, 0, 1, 0)
+        page.BackgroundColor3 = CFG.UI.Panel
+        page.BackgroundTransparency = 0.25
+        page.BorderSizePixel = 0
+        page.ScrollBarThickness = 4
+        page.ScrollBarImageColor3 = CFG.UI.Accent
+        page.Visible = false
+        page.Parent = content
+        Instance.new("UICorner", page).CornerRadius = UDim.new(0, 8)
+        local list = Instance.new("UIListLayout", page)
+        list.Padding = UDim.new(0, 8)
+        list.SortOrder = Enum.SortOrder.LayoutOrder
+        local pad = Instance.new("UIPadding", page)
+        pad.PaddingTop = UDim.new(0, 8)
+        pad.PaddingLeft = UDim.new(0, 8)
+        pad.PaddingRight = UDim.new(0, 8)
+        pad.PaddingBottom = UDim.new(0, 8)
+        pcall(function()
+            page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+            page.CanvasSize = UDim2.new(0, 0, 0, 0)
+        end)
+        state.pages[name] = page
+        return page
+    end
+
+    local pageAimbot = makePage("aimbot")
+    local pageESP = makePage("esp")
+    local pageCustom = makePage("customize")
 
     local order = 0
-    local function toggleRow(text, cfg, key)
+    local function nextOrder()
         order = order + 1
+        return order
+    end
+
+    local function addSection(parent, text)
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -8, 0, 20)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text
+        lbl.TextColor3 = CFG.UI.Accent
+        lbl.TextSize = 15
+        lbl.Font = Enum.Font.GothamBold
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.LayoutOrder = nextOrder()
+        lbl.Parent = parent
+    end
+
+    local function addToggle(parent, text, cfg, key, onChange)
         local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, 0, 0, 22)
+        row.Size = UDim2.new(1, -8, 0, 26)
         row.BackgroundTransparency = 1
-        row.LayoutOrder = order
-        row.Parent = content
+        row.LayoutOrder = nextOrder()
+        row.Parent = parent
 
         local lbl = Instance.new("TextLabel", row)
-        lbl.Size = UDim2.new(1, -44, 1, 0)
+        lbl.Size = UDim2.new(1, -56, 1, 0)
         lbl.BackgroundTransparency = 1
         lbl.Text = text
         lbl.TextColor3 = Color3.fromRGB(225, 225, 225)
-        lbl.TextSize = 13
+        lbl.TextSize = 14
         lbl.Font = Enum.Font.Gotham
         lbl.TextXAlignment = Enum.TextXAlignment.Left
 
         local sw = Instance.new("TextButton", row)
-        sw.Size = UDim2.new(0, 36, 0, 18)
-        sw.Position = UDim2.new(1, -36, 0.5, -9)
+        sw.Size = UDim2.new(0, 38, 0, 18)
+        sw.Position = UDim2.new(1, -38, 0.5, -9)
         sw.BackgroundColor3 = cfg[key] and CFG.UI.Accent or Color3.fromRGB(45, 45, 55)
         sw.Text = ""
         sw.AutoButtonColor = false
@@ -511,7 +659,7 @@ local function buildUI()
 
         local knob = Instance.new("Frame", sw)
         knob.Size = UDim2.new(0, 12, 0, 12)
-        knob.Position = UDim2.new(0, cfg[key] and 21 or 3, 0.5, -6)
+        knob.Position = UDim2.new(0, cfg[key] and 23 or 3, 0.5, -6)
         knob.BackgroundColor3 = Color3.new(1, 1, 1)
         knob.BorderSizePixel = 0
         Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
@@ -521,17 +669,284 @@ local function buildUI()
             cfg[key] = v
             sw.BackgroundColor3 = v and CFG.UI.Accent or Color3.fromRGB(45, 45, 55)
             pcall(function()
-                knob:TweenPosition(UDim2.new(0, v and 21 or 3, 0.5, -6), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.12, true)
+                knob:TweenPosition(UDim2.new(0, v and 23 or 3, 0.5, -6), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.12, true)
             end)
+            if onChange then onChange(v) end
         end)
     end
 
-    toggleRow("aimbot", CFG.Aimbot, "Enabled")
-    toggleRow("silent aim", CFG.Aimbot, "Silent")
-    toggleRow("esp", CFG.ESP, "Enabled")
-    toggleRow("boxes", CFG.ESP, "Boxes")
-    toggleRow("names", CFG.ESP, "Names")
-    toggleRow("tracers", CFG.ESP, "Tracers")
+    local function addSlider(parent, text, cfg, key, minV, maxV, integer, suffix)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, -8, 0, 44)
+        row.BackgroundTransparency = 1
+        row.LayoutOrder = nextOrder()
+        row.Parent = parent
+
+        local lbl = Instance.new("TextLabel", row)
+        lbl.Size = UDim2.new(0, 200, 0, 18)
+        lbl.Position = UDim2.new(0, 0, 0, 2)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text
+        lbl.TextColor3 = Color3.fromRGB(225, 225, 225)
+        lbl.TextSize = 14
+        lbl.Font = Enum.Font.Gotham
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+        local val = Instance.new("TextLabel", row)
+        val.Size = UDim2.new(0, 80, 0, 18)
+        val.Position = UDim2.new(1, -80, 0, 2)
+        val.BackgroundTransparency = 1
+        val.Text = tostring(cfg[key]) .. (suffix or "")
+        val.TextColor3 = CFG.UI.Accent
+        val.TextSize = 14
+        val.Font = Enum.Font.GothamBold
+        val.TextXAlignment = Enum.TextXAlignment.Right
+
+        local track = Instance.new("Frame", row)
+        track.Size = UDim2.new(1, 0, 0, 6)
+        track.Position = UDim2.new(0, 0, 0, 26)
+        track.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+        track.BorderSizePixel = 0
+        Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+        local fill = Instance.new("Frame", track)
+        fill.Size = UDim2.new((cfg[key] - minV) / (maxV - minV), 0, 1, 0)
+        fill.BackgroundColor3 = CFG.UI.Accent
+        fill.BorderSizePixel = 0
+        Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+        local knob = Instance.new("Frame", track)
+        knob.Size = UDim2.new(0, 14, 0, 14)
+        knob.Position = UDim2.new((cfg[key] - minV) / (maxV - minV), -7, 0.5, -7)
+        knob.BackgroundColor3 = Color3.new(1, 1, 1)
+        knob.BorderSizePixel = 0
+        Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+        local dragging = false
+        local function apply(input)
+            local rel = math.clamp((input.Position.X - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+            local v = minV + (maxV - minV) * rel
+            if integer then
+                v = math.floor(v + 0.5)
+            else
+                v = math.floor(v * 100 + 0.5) / 100
+            end
+            cfg[key] = v
+            fill.Size = UDim2.new(rel, 0, 1, 0)
+            knob.Position = UDim2.new(rel, -7, 0.5, -7)
+            val.Text = tostring(v) .. (suffix or "")
+        end
+
+        track.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = true
+                apply(input)
+            end
+        end)
+        track.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = false
+            end
+        end)
+        table.insert(state.conns, UserInputService.InputChanged:Connect(function(input)
+            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                apply(input)
+            end
+        end))
+    end
+
+    local function addColor(parent, text, cfg, key, onChange)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, -8, 0, 62)
+        row.BackgroundTransparency = 1
+        row.LayoutOrder = nextOrder()
+        row.Parent = parent
+
+        local lbl = Instance.new("TextLabel", row)
+        lbl.Size = UDim2.new(0, 160, 0, 20)
+        lbl.Position = UDim2.new(0, 0, 0, 2)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text
+        lbl.TextColor3 = Color3.fromRGB(225, 225, 225)
+        lbl.TextSize = 14
+        lbl.Font = Enum.Font.Gotham
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+        local preview = Instance.new("Frame", row)
+        preview.Size = UDim2.new(0, 22, 0, 22)
+        preview.Position = UDim2.new(1, -160, 0, 0)
+        preview.BackgroundColor3 = cfg[key]
+        preview.BorderSizePixel = 0
+        Instance.new("UICorner", preview).CornerRadius = UDim.new(0, 4)
+
+        local box = Instance.new("TextBox", row)
+        box.Size = UDim2.new(0, 120, 0, 24)
+        box.Position = UDim2.new(1, -130, 0, -1)
+        box.BackgroundColor3 = Color3.fromRGB(32, 32, 42)
+        box.TextColor3 = Color3.fromRGB(255, 255, 255)
+        box.PlaceholderText = "#RRGGBB"
+        box.Text = toHex(cfg[key])
+        box.TextSize = 13
+        box.Font = Enum.Font.Code
+        box.ClearTextOnFocus = false
+        box.BorderSizePixel = 0
+        Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+
+        local function applyColor(c)
+            cfg[key] = c
+            preview.BackgroundColor3 = c
+            box.Text = toHex(c)
+            if onChange then onChange(c) end
+        end
+
+        box.FocusLost:Connect(function()
+            local parsed = parseHex(box.Text)
+            if parsed then
+                applyColor(parsed)
+            else
+                box.Text = toHex(cfg[key])
+            end
+        end)
+
+        local swRow = Instance.new("Frame", row)
+        swRow.Size = UDim2.new(1, 0, 0, 22)
+        swRow.Position = UDim2.new(0, 0, 0, 30)
+        swRow.BackgroundTransparency = 1
+        local sl = Instance.new("UIListLayout", swRow)
+        sl.FillDirection = Enum.FillDirection.Horizontal
+        sl.Padding = UDim.new(0, 4)
+        sl.SortOrder = Enum.SortOrder.LayoutOrder
+
+        for i, c in ipairs(SWATCHES) do
+            local sw = Instance.new("TextButton", swRow)
+            sw.Size = UDim2.new(0, 20, 0, 20)
+            sw.BackgroundColor3 = c
+            sw.Text = ""
+            sw.AutoButtonColor = false
+            sw.LayoutOrder = i
+            Instance.new("UICorner", sw).CornerRadius = UDim.new(0, 4)
+            sw.MouseButton1Click:Connect(function()
+                applyColor(c)
+            end)
+        end
+    end
+
+    local function addCycle(parent, text, cfg, key, options)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, -8, 0, 30)
+        row.BackgroundTransparency = 1
+        row.LayoutOrder = nextOrder()
+        row.Parent = parent
+
+        local lbl = Instance.new("TextLabel", row)
+        lbl.Size = UDim2.new(0, 200, 1, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text
+        lbl.TextColor3 = Color3.fromRGB(225, 225, 225)
+        lbl.TextSize = 14
+        lbl.Font = Enum.Font.Gotham
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+        local btn = Instance.new("TextButton", row)
+        btn.Size = UDim2.new(0, 140, 0, 26)
+        btn.Position = UDim2.new(1, -140, 0.5, -13)
+        btn.BackgroundColor3 = Color3.fromRGB(32, 32, 42)
+        btn.Text = tostring(cfg[key])
+        btn.TextColor3 = CFG.UI.Accent
+        btn.TextSize = 13
+        btn.Font = Enum.Font.GothamBold
+        btn.BorderSizePixel = 0
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+        local idx = 1
+        for i, v in ipairs(options) do
+            if v == cfg[key] then idx = i end
+        end
+        btn.MouseButton1Click:Connect(function()
+            idx = idx % #options + 1
+            cfg[key] = options[idx]
+            btn.Text = tostring(cfg[key])
+        end)
+    end
+
+    -- AIMBOT TAB
+    addSection(pageAimbot, "aimbot")
+    addToggle(pageAimbot, "enabled", CFG.Aimbot, "Enabled")
+    addToggle(pageAimbot, "silent aim", CFG.Aimbot, "Silent")
+    addToggle(pageAimbot, "team check", CFG.Aimbot, "TeamCheck")
+    addToggle(pageAimbot, "wall check", CFG.Aimbot, "WallCheck")
+    addToggle(pageAimbot, "always aim (no hold)", CFG.Aimbot, "Hold", function(v) CFG.Aimbot.Hold = not v end)
+    addToggle(pageAimbot, "show fov circle", CFG.Aimbot, "ShowFOV")
+    addSection(pageAimbot, "strength")
+    addSlider(pageAimbot, "aim strength", CFG.Aimbot, "Strength", 1, 100, true, "%")
+    addSlider(pageAimbot, "fov radius", CFG.Aimbot, "FOV", 40, 600, true, "px")
+    addSlider(pageAimbot, "max distance", CFG.Aimbot, "MaxDistance", 200, 6000, true, "m")
+    addSlider(pageAimbot, "prediction", CFG.Aimbot, "Prediction", 0, 1, false, "s")
+    addCycle(pageAimbot, "aim part", CFG.Aimbot, "Bone", BONES)
+
+    -- ESP TAB
+    addSection(pageESP, "esp")
+    addToggle(pageESP, "enabled", CFG.ESP, "Enabled")
+    addToggle(pageESP, "boxes", CFG.ESP, "Boxes")
+    addToggle(pageESP, "names", CFG.ESP, "Names")
+    addToggle(pageESP, "distance", CFG.ESP, "Distance")
+    addToggle(pageESP, "health bars", CFG.ESP, "Health")
+    addToggle(pageESP, "tracers", CFG.ESP, "Tracers")
+    addSection(pageESP, "layout")
+    addSlider(pageESP, "max distance", CFG.ESP, "MaxDistance", 200, 6000, true, "m")
+    addSlider(pageESP, "box thickness", CFG.ESP, "Thickness", 1, 6, true, "px")
+
+    -- CUSTOMIZE TAB
+    addSection(pageCustom, "colors")
+    addColor(pageCustom, "box color", CFG.ESP, "Color")
+    addColor(pageCustom, "name color", CFG.ESP, "NameColor")
+    addColor(pageCustom, "tracer color", CFG.ESP, "TracerColor")
+    addColor(pageCustom, "ui accent", CFG.UI, "Accent", function(c)
+        if state.gui.stroke then state.gui.stroke.Color = c end
+        if state.gui.stamp then state.gui.stamp.TextColor3 = c end
+        for name, tab in pairs(state.tabs) do
+            if name == state.activeTab then
+                tab.BackgroundColor3 = c
+            end
+        end
+    end)
+
+    local function switchTab(name)
+        state.activeTab = name
+        for n, page in pairs(state.pages) do
+            page.Visible = (n == name)
+        end
+        for n, tab in pairs(state.tabs) do
+            if n == name then
+                tab.BackgroundColor3 = CFG.UI.Accent
+                tab.TextColor3 = Color3.fromRGB(12, 12, 16)
+            else
+                tab.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+                tab.TextColor3 = Color3.fromRGB(200, 200, 200)
+            end
+        end
+    end
+
+    local function makeTab(name, label)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1 / 3 - 4, 0, 1, -8)
+        btn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+        btn.Text = label
+        btn.TextColor3 = Color3.fromRGB(200, 200, 200)
+        btn.TextSize = 14
+        btn.Font = Enum.Font.GothamBold
+        btn.BorderSizePixel = 0
+        btn.LayoutOrder = #state.tabs + 1
+        btn.Parent = tabBar
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+        btn.MouseButton1Click:Connect(function() switchTab(name) end)
+        state.tabs[name] = btn
+    end
+
+    makeTab("aimbot", "Aimbot")
+    makeTab("esp", "ESP")
+    makeTab("customize", "Customize")
+    switchTab("aimbot")
 
     local dragging, dragStart, startPos
     header.InputBegan:Connect(function(input)
@@ -551,7 +966,7 @@ local function buildUI()
         end
     end)
 
-    state.gui = { root = gui, main = main }
+    state.gui = { root = gui, main = main, stroke = stroke, stamp = stamp }
 end
 
 -- lifecycle
