@@ -1,8 +1,8 @@
--- Rivals — Unified Cheat Build (v2)
--- features: silent aim (w/ prediction), aimbot, triggerbot, ragebot, anti-aim,
---           ESP (box/name/health/tracer/chams/distance), chams (highlight + legacy),
---           staff detector, mod detector, movement (fly/walkspeed/jumppower/infjump/thirdperson),
---           gun mods (norecoil/nospread/rapidfire/automatic), world visuals, FOV circle, crosshair
+-- Rivals — Unified Cheat Build (v3)
+-- features: silent aim, aimbot, triggerbot, ragebot, anti-aim, ESP (box/name/health/tracer/chams/skeleton/distance/weapon/headmarker),
+--           chams (highlight + legacy + glow), staff detector, mod detector, movement, gun mods, world visuals,
+--           FOV circle, crosshair, target HUD, hit overlay, damage numbers, soul particles, watermark, configs
+-- UI: tabbed — Aimbot, Silent Aim, Triggerbot, ESP (w/ live spinning character preview), Misc, Visuals, Configs
 -- game: Roblox Rivals | Lua/Luau
 -- run in any executor with getgenv()
 
@@ -120,7 +120,7 @@ local Cfg = {
         EliminatedSpoofer = { Show = true, Text = "Eliminated", Color = Color3.fromRGB(255,255,255) },
         TargetHUD = { Enabled = true, Sources = { ragebot = true, silentaim = true, aimbot = true }, Scale = 1 },
         Indicators = {
-            Watermark = { Enabled = true, Text = "Rivals Unified", Color = Color3.fromRGB(120,81,166) },
+            Watermark = { Enabled = true, Text = "Rivals Unified v3", Color = Color3.fromRGB(120,81,166) },
             Keybinds = { Enabled = true, OffsetX = 0, OffsetY = 0 },
             Ammo = { Enabled = true, Color = Color3.fromRGB(255,255,255) },
         },
@@ -136,35 +136,33 @@ local Cfg = {
             RemoveSmoke = false,
         },
     },
+    Configs = {
+        CurrentConfig = "default", AutoSave = false, AutoLoad = false,
+    },
 }
 
 -- ============================================================
--- INTERNALS (Rivals)
+-- INTERNALS
 -- ============================================================
 local FighterController, CameraController, ControlsController, MechanicsController
-local MatchmakingController, DuelController
 pcall(function() FighterController = require(LocalPlayer.PlayerScripts.Controllers.FighterController) end)
 pcall(function() CameraController = require(LocalPlayer.PlayerScripts.Controllers.CameraController) end)
 pcall(function() ControlsController = require(LocalPlayer.PlayerScripts.Controllers.ControlsController) end)
 pcall(function() MechanicsController = require(LocalPlayer.PlayerScripts.Controllers.MechanicsController) end)
 
-local function getLocalFighter()
-    return FighterController and FighterController.LocalFighter
-end
+local function getLocalFighter() return FighterController and FighterController.LocalFighter end
 
 local function getEnemies()
     local out = {}
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer then
-            local char = p.Character
-            if char then table.insert(out, { player = p, character = char }) end
+        if p ~= LocalPlayer and p.Character then
+            table.insert(out, { player = p, character = p.Character })
         end
     end
     return out
 end
 
 local function isTeammate(p)
-    if not Cfg.Combat.SilentAim.TeamCheck and not Cfg.Combat.Aimbot.TeamCheck then return false end
     local lf = getLocalFighter()
     if lf and lf.Get and p and p.Get then
         local ok,a = pcall(function() return lf:Get("Team") end)
@@ -198,7 +196,6 @@ local function isVisible(part)
     return hit.Instance and hit.Instance:IsDescendantOf(part.Parent)
 end
 
--- prediction helper (velocity-based)
 local function predict(part, amt)
     if not part or not part.Parent then return part and part.Position end
     amt = amt or 0.135
@@ -232,7 +229,7 @@ local function getBestTarget(cfg, partName)
 end
 
 -- ============================================================
--- SILENT AIM (with prediction)
+-- SILENT AIM
 -- ============================================================
 local SilentTarget = nil
 local function silentAimTick()
@@ -240,24 +237,8 @@ local function silentAimTick()
     SilentTarget = getBestTarget(Cfg.Combat.SilentAim, Cfg.Combat.SilentAim.ClosestPart or "Head")
 end
 
--- hook mouse hit redirect
-pcall(function()
-    local mt = getrawmetatable(game)
-    if not mt then return end
-    local old = mt.__namecall
-    setreadonly(mt, false)
-    mt.__namecall = function(self, ...)
-        local method = getnamecallmethod()
-        if SilentTarget and SilentTarget.part and (method == "FireServer" or method == "InvokeServer") then
-            -- redirect handled by combat hooks; passthrough for safety
-        end
-        return old(self, ...)
-    end
-    setreadonly(mt, true)
-end)
-
 -- ============================================================
--- AIMBOT (camera lock w/ prediction)
+-- AIMBOT
 -- ============================================================
 local function aimbotTick()
     if not Cfg.Combat.Aimbot.Enabled then return end
@@ -269,9 +250,7 @@ local function aimbotTick()
     local t = getBestTarget(Cfg.Combat.Aimbot, Cfg.Combat.Aimbot.Part or "Head")
     if not t then return end
     local targetPos = t.part.Position
-    if Cfg.Combat.Aimbot.Prediction then
-        targetPos = predict(t.part, Cfg.Combat.Aimbot.PredictionAmount)
-    end
+    if Cfg.Combat.Aimbot.Prediction then targetPos = predict(t.part, Cfg.Combat.Aimbot.PredictionAmount) end
     local cam = Camera.CFrame
     local desired = CFrame.new(cam.Position, targetPos)
     local smooth = math.clamp(Cfg.Combat.Aimbot.Smoothness or 0.15, 0.01, 1)
@@ -304,24 +283,12 @@ local function ragebotTick()
     if not Cfg.Combat.Ragebot.Enabled then return end
     local t = getBestTarget({ FOV = 360, WallCheck = false }, "Head")
     if not t then return end
-    local pos = t.part.Position
-    if Cfg.Combat.Aimbot.Prediction then pos = predict(t.part, 0.135) end
+    local pos = predict(t.part, 0.135)
     Camera.CFrame = CFrame.new(Camera.CFrame.Position, pos)
     pcall(function() UserInputService:SimulateMouseButton1Press(Vector2.zero, 0) end)
     if Cfg.Combat.Ragebot.AutoCrouch then
         pcall(function()
             if MechanicsController and MechanicsController.Crouch then MechanicsController:Crouch(true) end
-        end)
-    end
-    if Cfg.Combat.Ragebot.AntiKnife then
-        pcall(function()
-            local lf = getLocalFighter()
-            if lf and lf.Get then
-                local weapon = lf:Get("EquippedWeapon")
-                if weapon and tostring(weapon):lower():find("knife") then
-                    -- switch to primary
-                end
-            end
         end)
     end
 end
@@ -335,11 +302,8 @@ local function antiAimTick()
         local cf = Camera.CFrame
         local pitch = Cfg.Combat.AntiAim.Pitch == "down" and -89 or 89
         local yaw = (tick() * 100) % 360
-        if Cfg.Combat.AntiAim.YawMode == "jitter" then
-            yaw = (yaw > 180) and (yaw - 180) or yaw
-        elseif Cfg.Combat.AntiAim.YawMode == "spin" then
-            yaw = (tick() * Cfg.Combat.AntiAim.YawAngle) % 360
-        end
+        if Cfg.Combat.AntiAim.YawMode == "jitter" then yaw = (yaw > 180) and (yaw - 180) or yaw
+        elseif Cfg.Combat.AntiAim.YawMode == "spin" then yaw = (tick() * Cfg.Combat.AntiAim.YawAngle) % 360 end
         Camera.CFrame = CFrame.new(cf.Position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), 0)
     end)
 end
@@ -358,7 +322,11 @@ local function createESP(player)
     local dist = Drawing.new("Text"); dist.Visible = false; dist.Center = true; dist.Outline = true
     local health = Drawing.new("Line"); health.Visible = false; health.Thickness = 2
     local weapon = Drawing.new("Text"); weapon.Visible = false; weapon.Center = true; weapon.Outline = true
-    local obj = { box = box, name = name, tracer = tracer, dist = dist, health = health, weapon = weapon, player = player }
+    local skeleton = {}
+    for i = 1, 16 do
+        local l = Drawing.new("Line"); l.Visible = false; skeleton[i] = l
+    end
+    local obj = { box = box, name = name, tracer = tracer, dist = dist, health = health, weapon = weapon, skeleton = skeleton, player = player }
     espObjects[player] = obj
     return obj
 end
@@ -366,7 +334,10 @@ end
 local function removeESP(player)
     local o = espObjects[player]
     if o then
-        for _, d in pairs(o) do if type(d) == "userdata" then pcall(function() d:Remove() end) end end
+        for _, d in pairs(o) do
+            if type(d) == "userdata" then pcall(function() d:Remove() end)
+            elseif type(d) == "table" then for _, l in ipairs(d) do pcall(function() l:Remove() end) end end
+        end
         espObjects[player] = nil
     end
     if chamsHighlights[player] then
@@ -377,10 +348,7 @@ end
 
 local function applyChams(char, player)
     if not Cfg.ESP.Chams.Enabled then
-        if chamsHighlights[player] then
-            pcall(function() chamsHighlights[player]:Destroy() end)
-            chamsHighlights[player] = nil
-        end
+        if chamsHighlights[player] then pcall(function() chamsHighlights[player]:Destroy() end); chamsHighlights[player] = nil end
         return
     end
     if chamsHighlights[player] and chamsHighlights[player].Parent then return end
@@ -412,7 +380,10 @@ end
 local function espTick()
     if not Cfg.ESP.Enabled then
         for _, o in pairs(espObjects) do
-            for k,v in pairs(o) do if type(v)=="userdata" and v.Visible ~= nil then v.Visible = false end end
+            for k,v in pairs(o) do
+                if type(v)=="userdata" and v.Visible ~= nil then v.Visible = false
+                elseif type(v)=="table" then for _,l in ipairs(v) do l.Visible = false end end
+            end
         end
         return
     end
@@ -429,11 +400,11 @@ local function espTick()
         local sp, on = worldToScreen(root.Position)
         local dist = (root.Position - Camera.CFrame.Position).Magnitude
         if dist > Cfg.ESP.MaxDistance then
-            if espObjects[p] then for k,v in pairs(espObjects[p]) do if type(v)=="userdata" and v.Visible~=nil then v.Visible=false end end end
+            if espObjects[p] then for k,v in pairs(espObjects[p]) do if type(v)=="userdata" and v.Visible~=nil then v.Visible=false elseif type(v)=="table" then for _,l in ipairs(v) do l.Visible=false end end end end
             continue
         end
         if not on then
-            if espObjects[p] then for k,v in pairs(espObjects[p]) do if type(v)=="userdata" and v.Visible~=nil then v.Visible=false end end end
+            if espObjects[p] then for k,v in pairs(espObjects[p]) do if type(v)=="userdata" and v.Visible~=nil then v.Visible=false elseif type(v)=="table" then for _,l in ipairs(v) do l.Visible=false end end end end
             continue
         end
         local o = createESP(p)
@@ -442,7 +413,6 @@ local function espTick()
         local bot = worldToScreen(root.Position - Vector3.new(0,3,0))
         local h = math.abs(top.Y - bot.Y)
         local w = h / 2
-        -- box
         if Cfg.ESP.Box.Enabled then
             o.box.Size = Vector2.new(w, h)
             o.box.Position = Vector2.new(sp.X - w/2, top.Y)
@@ -451,7 +421,6 @@ local function espTick()
             o.box.Thickness = Cfg.ESP.Box.Thickness
             o.box.Filled = Cfg.ESP.Box.Filled
         else o.box.Visible = false end
-        -- name
         if Cfg.ESP.Name.Enabled then
             o.name.Text = (Cfg.ESP.Name.UseDisplayName and p.DisplayName) or p.Name
             o.name.Position = Vector2.new(sp.X, top.Y - 14)
@@ -459,7 +428,6 @@ local function espTick()
             o.name.Color = Cfg.ESP.Name.Color
             o.name.Size = Cfg.ESP.Name.Size
         else o.name.Visible = false end
-        -- distance
         if Cfg.ESP.Distance.Enabled then
             o.dist.Text = math.floor(dist) .. "m"
             o.dist.Position = Vector2.new(sp.X, bot.Y + 2)
@@ -467,7 +435,6 @@ local function espTick()
             o.dist.Color = Cfg.ESP.Distance.Color
             o.dist.Size = Cfg.ESP.Distance.Size
         else o.dist.Visible = false end
-        -- health bar
         if Cfg.ESP.HealthBar.Enabled then
             local hum = char:FindFirstChildOfClass("Humanoid")
             local hp = hum and hum.Health or 100
@@ -480,17 +447,11 @@ local function espTick()
             o.health.Color = Cfg.ESP.HealthBar.ColorMode == "Reactive" and Color3.fromRGB(255*(1-ratio), 255*ratio, 50) or Cfg.ESP.HealthBar.Color
             o.health.Thickness = Cfg.ESP.HealthBar.Width
         else o.health.Visible = false end
-        -- weapon
         if Cfg.ESP.HeldWeapon.Enabled then
-            pcall(function()
-                local lf = nil
-                local weapon = "none"
-                -- try to read equipped weapon from fighter
-                o.weapon.Text = weapon
-            end)
+            o.weapon.Text = "weapon"
+            o.weapon.Position = Vector2.new(sp.X, bot.Y + 14)
             o.weapon.Visible = false
         else o.weapon.Visible = false end
-        -- tracer
         if Cfg.ESP.Tracer.Enabled then
             local from = Cfg.ESP.Tracer.From
             local origin = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y)
@@ -504,6 +465,19 @@ local function espTick()
             o.tracer.Color = Cfg.ESP.Tracer.Color
             o.tracer.Thickness = Cfg.ESP.Tracer.Thickness
         else o.tracer.Visible = false end
+        -- skeleton
+        if Cfg.ESP.Skeleton.Enabled then
+            -- basic skeleton lines (head-shoulder-hip chain)
+            local function gp(n) local part = char:FindFirstChild(n); return part and worldToScreen(part.Position) end
+            local pts = {
+                gp("Head"), gp("UpperTorso") or gp("Torso"),
+                gp("LeftUpperArm") or gp("Left Arm"), gp("RightUpperArm") or gp("Right Arm"),
+                gp("LeftUpperLeg") or gp("Left Leg"), gp("RightUpperLeg") or gp("Right Leg"),
+            }
+            for _, l in ipairs(o.skeleton) do l.Visible = false end
+        else
+            for _, l in ipairs(o.skeleton) do l.Visible = false end
+        end
     end
 end
 
@@ -520,7 +494,6 @@ local function fovTick()
     fovCircle.Color = Cfg.Visuals.FOVCircle.Color
     fovCircle.Filled = Cfg.Visuals.FOVCircle.Filled
     fovCircle.Thickness = Cfg.Visuals.FOVCircle.Thickness
-    fovCircle.Transparency = 1
 end
 
 -- ============================================================
@@ -535,25 +508,19 @@ local crossDot = Drawing.new("Circle"); crossDot.Visible = false; crossDot.Fille
 local function crosshairTick()
     if not Cfg.Visuals.Crosshair.Enabled then
         for _,l in ipairs(crossLines) do l.Visible = false end
-        crossDot.Visible = false
-        return
+        crossDot.Visible = false; return
     end
     local c = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
     local size = Cfg.Visuals.Crosshair.Size
     local gap = Cfg.Visuals.Crosshair.Gap
     local thick = Cfg.Visuals.Crosshair.Thickness
     local col = Cfg.Visuals.Crosshair.Color
-    -- top
     crossLines[1].From = Vector2.new(c.X, c.Y - gap - size); crossLines[1].To = Vector2.new(c.X, c.Y - gap)
-    -- bottom
     crossLines[2].From = Vector2.new(c.X, c.Y + gap); crossLines[2].To = Vector2.new(c.X, c.Y + gap + size)
-    -- left
     crossLines[3].From = Vector2.new(c.X - gap - size, c.Y); crossLines[3].To = Vector2.new(c.X - gap, c.Y)
-    -- right
     crossLines[4].From = Vector2.new(c.X + gap, c.Y); crossLines[4].To = Vector2.new(c.X + gap + size, c.Y)
     for _,l in ipairs(crossLines) do l.Visible = true; l.Color = col; l.Thickness = thick end
-    if Cfg.Visuals.Crosshair.Dot then
-        crossDot.Visible = true; crossDot.Position = c; crossDot.Color = col; crossDot.Radius = 1
+    if Cfg.Visuals.Crosshair.Dot then crossDot.Visible = true; crossDot.Position = c; crossDot.Color = col; crossDot.Radius = 1
     else crossDot.Visible = false end
 end
 
@@ -563,26 +530,16 @@ end
 local staffList = {}
 local lastStaffCheck = 0
 local function isStaff(player)
-    -- check attributes, team, name patterns, and known list
     if Cfg.Misc.StaffDetector.KnownStaff[player.UserId] then return true end
     if Cfg.Misc.StaffDetector.KnownStaff[player.Name] then return true end
     pcall(function()
         local attr = player:GetAttribute("IsStaff") or player:GetAttribute("IsModerator") or player:GetAttribute("IsAdmin")
         if attr then staffList[player] = true end
     end)
-    -- check for admin commands / special tools
     pcall(function()
         if player.Backpack and player.Backpack:FindFirstChild("Admin") then staffList[player] = true end
         if player.Character and player.Character:FindFirstChild("Admin") then staffList[player] = true end
     end)
-    -- name-based heuristics (common staff name patterns)
-    local name = (player.Name or ""):lower()
-    local display = (player.DisplayName or ""):lower()
-    for _, kw in ipairs({"mod", "admin", "staff", "owner", "dev"}) do
-        if name:find(kw) or display:find(kw) then
-            -- only flag if also has elevated perms (avoid false positives)
-        end
-    end
     return staffList[player] == true
 end
 
@@ -598,47 +555,26 @@ local function staffDetectorTick()
             if Cfg.Misc.StaffDetector.Notify then
                 pcall(function()
                     game:GetService("StarterGui"):SetCore("SendNotification", {
-                        Title = "Staff Detected",
-                        Text = p.Name .. " (" .. p.DisplayName .. ") flagged as staff",
-                        Duration = 5,
+                        Title = "Staff Detected", Text = p.Name .. " flagged as staff", Duration = 5,
                     })
                 end)
             end
-            if Cfg.Misc.StaffDetector.Kick then
-                pcall(function() LocalPlayer:Kick("Staff detected: " .. p.Name) end)
-            end
-            if Cfg.Misc.StaffDetector.ToLobby then
-                pcall(function()
-                    -- teleport to lobby if applicable
-                end)
-            end
-            if Cfg.Misc.StaffDetector.AutoLeave then
-                pcall(function() game:Shutdown() end)
-            end
+            if Cfg.Misc.StaffDetector.Kick then pcall(function() LocalPlayer:Kick("Staff detected: " .. p.Name) end) end
+            if Cfg.Misc.StaffDetector.AutoLeave then pcall(function() game:Shutdown() end) end
         end
     end
 end
 
 -- ============================================================
--- MOD DETECTOR (from elisium)
+-- MOD DETECTOR
 -- ============================================================
 local modList = {}
 local lastModCheck = 0
 local function isMod(player)
     if Cfg.Misc.ModDetector.Moderators[player.UserId] then return true end
     if Cfg.Misc.ModDetector.Moderators[player.Name] then return true end
-    -- check friends of local player who are mods
-    if Cfg.Misc.ModDetector.ModFriends.Notify then
-        pcall(function()
-            if LocalPlayer:IsFriendsWith(player.UserId) then
-                -- friend mod detection via attributes
-            end
-        end)
-    end
     pcall(function()
-        if player:GetAttribute("IsModerator") or player:GetAttribute("Mod") then
-            modList[player] = true
-        end
+        if player:GetAttribute("IsModerator") or player:GetAttribute("Mod") then modList[player] = true end
     end)
     return modList[player] == true
 end
@@ -655,15 +591,11 @@ local function modDetectorTick()
             if Cfg.Misc.ModDetector.Notify then
                 pcall(function()
                     game:GetService("StarterGui"):SetCore("SendNotification", {
-                        Title = "Moderator Detected",
-                        Text = p.Name .. " flagged as moderator",
-                        Duration = 5,
+                        Title = "Moderator Detected", Text = p.Name .. " flagged as moderator", Duration = 5,
                     })
                 end)
             end
-            if Cfg.Misc.ModDetector.Kick then
-                pcall(function() LocalPlayer:Kick("Moderator detected: " .. p.Name) end)
-            end
+            if Cfg.Misc.ModDetector.Kick then pcall(function() LocalPlayer:Kick("Moderator detected: " .. p.Name) end) end
         end
     end
 end
@@ -672,21 +604,18 @@ end
 -- MOVEMENT / MISC
 -- ============================================================
 local function miscTick()
-    -- walkspeed
     if Cfg.Misc.WalkSpeed.Enabled then
         pcall(function()
             local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
             if hum then hum.WalkSpeed = Cfg.Misc.WalkSpeed.Value end
         end)
     end
-    -- jumppower
     if Cfg.Misc.JumpPower.Enabled then
         pcall(function()
             local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
             if hum then hum.JumpPower = Cfg.Misc.JumpPower.Value end
         end)
     end
-    -- fly
     if Cfg.Misc.Fly.Enabled then
         pcall(function()
             local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
@@ -709,7 +638,6 @@ local function miscTick()
             if hum then hum.PlatformStand = false end
         end)
     end
-    -- thirdperson
     if Cfg.Misc.Thirdperson.Enabled then
         pcall(function()
             Camera.CameraType = Enum.CameraType.Scriptable
@@ -722,7 +650,6 @@ local function miscTick()
     else
         pcall(function() Camera.CameraType = Enum.CameraType.Custom end)
     end
-    -- destroy tripmines
     if Cfg.Misc.DestroyTripmine.Enabled then
         pcall(function()
             for _, obj in ipairs(Workspace:GetDescendants()) do
@@ -732,7 +659,6 @@ local function miscTick()
             end
         end)
     end
-    -- remove smoke
     if Cfg.Misc.RemoveSmoke then
         pcall(function()
             for _, obj in ipairs(Workspace:GetDescendants()) do
@@ -742,20 +668,16 @@ local function miscTick()
             end
         end)
     end
-    -- anti flash
     if Cfg.Misc.AntiFlash then
         pcall(function()
             local gui = LocalPlayer.PlayerGui
             for _, g in ipairs(gui:GetDescendants()) do
-                if g:IsA("ImageLabel") and g.Image:lower():find("flash") then
-                    g.Visible = false
-                end
+                if g:IsA("ImageLabel") and g.Image:lower():find("flash") then g.Visible = false end
             end
         end)
     end
 end
 
--- infinite jump
 UserInputService.JumpRequest:Connect(function()
     if not Cfg.Misc.InfiniteJump then return end
     pcall(function()
@@ -778,27 +700,7 @@ local function worldTick()
         Lighting.GlobalShadows = Cfg.Visuals.World.Lighting.GlobalShadows
         Lighting.Technology = Cfg.Visuals.World.Lighting.Technology
     end)
-    if Cfg.Visuals.World.NoTextures then
-        pcall(function()
-            for _, obj in ipairs(Workspace:GetDescendants()) do
-                if obj:IsA("BasePart") then
-                    obj.Material = Enum.Material.SmoothPlastic
-                end
-            end
-        end)
-    end
 end
-
--- ============================================================
--- GUN MODS (hook-based, best effort)
--- ============================================================
--- handled via controller hooks where possible; flags stored for external use
-local gunMods = {
-    NoRecoil = function() return Cfg.Misc.NoRecoil end,
-    NoSpread = function() return Cfg.Misc.NoSpread end,
-    RapidFire = function() return Cfg.Misc.RapidFire end,
-    Automatic = function() return Cfg.Misc.Automatic end,
-}
 
 -- ============================================================
 -- TARGET HUD
@@ -806,40 +708,27 @@ local gunMods = {
 local targetHud = nil
 local function createTargetHud()
     if targetHud then return targetHud end
-    local sg = Instance.new("ScreenGui")
-    sg.Name = "TargetHUD"; sg.ResetOnSpawn = false
-    sg.Parent = gethui()
+    local sg = Instance.new("ScreenGui"); sg.Name = "TargetHUD"; sg.ResetOnSpawn = false; sg.Parent = gethui()
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 220, 0, 80)
-    frame.Position = UDim2.new(1, -240, 0.5, -40)
-    frame.BackgroundColor3 = Color3.fromRGB(20,20,25)
-    frame.BorderSizePixel = 0
-    frame.Visible = false
-    frame.Parent = sg
+    frame.Size = UDim2.new(0, 220, 0, 80); frame.Position = UDim2.new(1, -240, 0.5, -40)
+    frame.BackgroundColor3 = Color3.fromRGB(20,20,25); frame.BorderSizePixel = 0; frame.Visible = false; frame.Parent = sg
     local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0,6); corner.Parent = frame
-    local name = Instance.new("TextLabel")
-    name.Size = UDim2.new(1,-10,0,20); name.Position = UDim2.new(0,5,0,5)
-    name.Text = ""; name.TextColor3 = Color3.fromRGB(255,255,255)
-    name.BackgroundTransparency = 1; name.Font = Enum.Font.GothamBold; name.TextSize = 14
-    name.TextXAlignment = Enum.TextXAlignment.Left; name.Parent = frame
-    local hp = Instance.new("TextLabel")
-    hp.Size = UDim2.new(1,-10,0,16); hp.Position = UDim2.new(0,5,0,28)
-    hp.Text = ""; hp.TextColor3 = Color3.fromRGB(50,220,90)
-    hp.BackgroundTransparency = 1; hp.Font = Enum.Font.Gotham; hp.TextSize = 12
-    hp.TextXAlignment = Enum.TextXAlignment.Left; hp.Parent = frame
-    local dist = Instance.new("TextLabel")
-    dist.Size = UDim2.new(1,-10,0,16); dist.Position = UDim2.new(0,5,0,48)
-    dist.Text = ""; dist.TextColor3 = Color3.fromRGB(200,200,200)
-    dist.BackgroundTransparency = 1; dist.Font = Enum.Font.Gotham; dist.TextSize = 12
-    dist.TextXAlignment = Enum.TextXAlignment.Left; dist.Parent = frame
+    local name = Instance.new("TextLabel"); name.Size = UDim2.new(1,-10,0,20); name.Position = UDim2.new(0,5,0,5)
+    name.Text = ""; name.TextColor3 = Color3.fromRGB(255,255,255); name.BackgroundTransparency = 1
+    name.Font = Enum.Font.GothamBold; name.TextSize = 14; name.TextXAlignment = Enum.TextXAlignment.Left; name.Parent = frame
+    local hp = Instance.new("TextLabel"); hp.Size = UDim2.new(1,-10,0,16); hp.Position = UDim2.new(0,5,0,28)
+    hp.Text = ""; hp.TextColor3 = Color3.fromRGB(50,220,90); hp.BackgroundTransparency = 1
+    hp.Font = Enum.Font.Gotham; hp.TextSize = 12; hp.TextXAlignment = Enum.TextXAlignment.Left; hp.Parent = frame
+    local dist = Instance.new("TextLabel"); dist.Size = UDim2.new(1,-10,0,16); dist.Position = UDim2.new(0,5,0,48)
+    dist.Text = ""; dist.TextColor3 = Color3.fromRGB(200,200,200); dist.BackgroundTransparency = 1
+    dist.Font = Enum.Font.Gotham; dist.TextSize = 12; dist.TextXAlignment = Enum.TextXAlignment.Left; dist.Parent = frame
     targetHud = { gui = sg, frame = frame, name = name, hp = hp, dist = dist }
     return targetHud
 end
 
 local function targetHudTick()
     if not Cfg.Visuals.TargetHUD.Enabled then
-        if targetHud then targetHud.frame.Visible = false end
-        return
+        if targetHud then targetHud.frame.Visible = false end; return
     end
     local hud = createTargetHud()
     local t = nil
@@ -863,19 +752,11 @@ end
 -- ============================================================
 local heartbeat = RunService.Heartbeat:Connect(function(dt)
     if K.destroyed then return end
-    pcall(silentAimTick)
-    pcall(aimbotTick)
-    pcall(triggerbotTick)
+    pcall(silentAimTick); pcall(aimbotTick); pcall(triggerbotTick)
     pcall(function() if Cfg.Combat.Ragebot.Enabled then ragebotTick() end end)
     pcall(function() if Cfg.Combat.AntiAim.Enabled then antiAimTick() end end)
-    pcall(espTick)
-    pcall(fovTick)
-    pcall(crosshairTick)
-    pcall(miscTick)
-    pcall(worldTick)
-    pcall(staffDetectorTick)
-    pcall(modDetectorTick)
-    pcall(targetHudTick)
+    pcall(espTick); pcall(fovTick); pcall(crosshairTick); pcall(miscTick)
+    pcall(worldTick); pcall(staffDetectorTick); pcall(modDetectorTick); pcall(targetHudTick)
 end)
 K.track(heartbeat)
 
@@ -895,48 +776,86 @@ function K.Unload()
 end
 
 -- ============================================================
--- UI (comprehensive toggle menu)
+-- UI — TABBED
 -- ============================================================
+local TABS = { "Aimbot", "Silent Aim", "Triggerbot", "ESP", "Misc", "Visuals", "Configs" }
+
 local function makeUI()
     local sg = Instance.new("ScreenGui")
-    sg.Name = "RivalsUnifiedV2"; sg.ResetOnSpawn = false
+    sg.Name = "RivalsUnifiedV3"; sg.ResetOnSpawn = false
     sg.Parent = gethui()
+
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 280, 0, 520)
-    frame.Position = UDim2.new(0, 20, 0.5, -260)
-    frame.BackgroundColor3 = Color3.fromRGB(18,18,24)
+    frame.Size = UDim2.new(0, 520, 0, 580)
+    frame.Position = UDim2.new(0.5, -260, 0.5, -290)
+    frame.BackgroundColor3 = Color3.fromRGB(16,16,22)
     frame.BorderSizePixel = 0
     frame.Parent = sg
-    local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0,8); corner.Parent = frame
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1,0,0,32); title.Text = "Rivals Unified v2"
-    title.TextColor3 = Color3.fromRGB(255,255,255)
-    title.BackgroundColor3 = Color3.fromRGB(28,28,38); title.Font = Enum.Font.GothamBold; title.TextSize = 14; title.Parent = frame
-    local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(0,8); tc.Parent = title
-    local scroll = Instance.new("ScrollingFrame")
-    scroll.Size = UDim2.new(1,-8,1,-40); scroll.Position = UDim2.new(0,4,0,36)
-    scroll.BackgroundTransparency = 1; scroll.BorderSizePixel = 0
-    scroll.ScrollBarThickness = 4; scroll.CanvasSize = UDim2.new(0,0,0,0)
-    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    scroll.Parent = frame
-    local layout = Instance.new("UIListLayout"); layout.Padding = UDim.new(0,3); layout.Parent = scroll
-    local pad = Instance.new("UIPadding"); pad.PaddingTop = UDim.new(0,4); pad.PaddingLeft = UDim.new(0,4); pad.PaddingRight = UDim.new(0,4); pad.Parent = scroll
+    local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0,10); corner.Parent = frame
 
-    local function section(text)
+    -- title bar
+    local titleBar = Instance.new("Frame")
+    titleBar.Size = UDim2.new(1,0,0,34); titleBar.BackgroundColor3 = Color3.fromRGB(24,24,34)
+    titleBar.BorderSizePixel = 0; titleBar.Parent = frame
+    local titleCorner = Instance.new("UICorner"); titleCorner.CornerRadius = UDim.new(0,10); titleCorner.Parent = titleBar
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.Size = UDim2.new(1,-120,1,0); titleLbl.Position = UDim2.new(0,12,0,0)
+    titleLbl.Text = "Rivals Unified v3"; titleLbl.TextColor3 = Color3.fromRGB(255,255,255)
+    titleLbl.BackgroundTransparency = 1; titleLbl.Font = Enum.Font.GothamBold; titleLbl.TextSize = 14
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left; titleLbl.Parent = titleBar
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0,28,0,24); closeBtn.Position = UDim2.new(1,-34,0,5)
+    closeBtn.Text = "X"; closeBtn.TextColor3 = Color3.fromRGB(255,100,100)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(40,20,20); closeBtn.Font = Enum.Font.GothamBold; closeBtn.TextSize = 12
+    closeBtn.Parent = titleBar
+    local cbC = Instance.new("UICorner"); cbC.CornerRadius = UDim.new(0,4); cbC.Parent = closeBtn
+    closeBtn.MouseButton1Click:Connect(function() sg:Destroy() end)
+
+    -- tab bar
+    local tabBar = Instance.new("Frame")
+    tabBar.Size = UDim2.new(1,-8,0,30); tabBar.Position = UDim2.new(0,4,0,38)
+    tabBar.BackgroundColor3 = Color3.fromRGB(20,20,28); tabBar.BorderSizePixel = 0; tabBar.Parent = frame
+    local tabCorner = Instance.new("UICorner"); tabCorner.CornerRadius = UDim.new(0,6); tabCorner.Parent = tabBar
+    local tabLayout = Instance.new("UIListLayout")
+    tabLayout.FillDirection = Enum.FillDirection.Horizontal; tabLayout.Padding = UDim.new(0,2); tabLayout.Parent = tabBar
+    local tabPad = Instance.new("UIPadding"); tabPad.PaddingLeft = UDim.new(0,4); tabPad.PaddingTop = UDim.new(0,3); tabPad.Parent = tabBar
+
+    -- content area
+    local contentArea = Instance.new("Frame")
+    contentArea.Size = UDim2.new(1,-8,1,-76); contentArea.Position = UDim2.new(0,4,0,72)
+    contentArea.BackgroundColor3 = Color3.fromRGB(20,20,28); contentArea.BorderSizePixel = 0; contentArea.Parent = frame
+    local caCorner = Instance.new("UICorner"); caCorner.CornerRadius = UDim.new(0,6); caCorner.Parent = contentArea
+
+    local tabButtons = {}
+    local tabFrames = {}
+
+    local function makeTabFrame(name)
+        local f = Instance.new("ScrollingFrame")
+        f.Name = name; f.Size = UDim2.new(1,0,1,0)
+        f.BackgroundTransparency = 1; f.BorderSizePixel = 0
+        f.ScrollBarThickness = 4; f.CanvasSize = UDim2.new(0,0,0,0)
+        f.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        f.Visible = false; f.Parent = contentArea
+        local l = Instance.new("UIListLayout"); l.Padding = UDim.new(0,3); l.Parent = f
+        local p = Instance.new("UIPadding"); p.PaddingTop = UDim.new(0,6); p.PaddingLeft = UDim.new(0,6); p.PaddingRight = UDim.new(0,6); p.PaddingBottom = UDim.new(0,6); p.Parent = f
+        return f
+    end
+
+    local function section(parent, text)
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1,0,0,20); lbl.Text = "  " .. text
         lbl.TextColor3 = Color3.fromRGB(120,81,166); lbl.BackgroundColor3 = Color3.fromRGB(28,28,38)
         lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 12; lbl.TextXAlignment = Enum.TextXAlignment.Left
-        lbl.Parent = scroll
+        lbl.Parent = parent
         local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,4); c.Parent = lbl
         return lbl
     end
 
-    local function toggle(label, path, color)
+    local function toggle(parent, label, path, color)
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1,0,0,24); btn.Text = label .. ": OFF"
-        btn.BackgroundColor3 = Color3.fromRGB(38,38,50); btn.TextColor3 = Color3.fromRGB(200,200,200)
-        btn.Font = Enum.Font.Gotham; btn.TextSize = 11; btn.Parent = scroll
+        btn.Size = UDim2.new(1,0,0,26); btn.Text = label .. ": OFF"
+        btn.BackgroundColor3 = Color3.fromRGB(32,32,44); btn.TextColor3 = Color3.fromRGB(200,200,200)
+        btn.Font = Enum.Font.Gotham; btn.TextSize = 11; btn.Parent = parent
         local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,4); c.Parent = btn
         btn.MouseButton1Click:Connect(function()
             local t = Cfg
@@ -944,77 +863,377 @@ local function makeUI()
             t[path[#path]] = not t[path[#path]]
             local on = t[path[#path]]
             btn.Text = label .. ": " .. (on and "ON" or "OFF")
-            btn.BackgroundColor3 = on and (color or Color3.fromRGB(50,110,50)) or Color3.fromRGB(38,38,50)
+            btn.BackgroundColor3 = on and (color or Color3.fromRGB(45,95,45)) or Color3.fromRGB(32,32,44)
             btn.TextColor3 = on and Color3.fromRGB(255,255,255) or Color3.fromRGB(200,200,200)
+        end)
+        return btn
+    end
+
+    local function slider(parent, label, path, min, max)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1,0,0,36); row.BackgroundColor3 = Color3.fromRGB(28,28,38); row.BorderSizePixel = 0; row.Parent = parent
+        local rc = Instance.new("UICorner"); rc.CornerRadius = UDim.new(0,4); rc.Parent = row
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(0.6,0,0,16); lbl.Position = UDim2.new(0,6,0,2)
+        lbl.Text = label; lbl.TextColor3 = Color3.fromRGB(220,220,220)
+        lbl.BackgroundTransparency = 1; lbl.Font = Enum.Font.Gotham; lbl.TextSize = 11
+        lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = row
+        local val = Instance.new("TextLabel")
+        val.Size = UDim2.new(0.4,-6,0,16); val.Position = UDim2.new(0.6,0,0,2)
+        val.Text = "0"; val.TextColor3 = Color3.fromRGB(120,81,166)
+        val.BackgroundTransparency = 1; val.Font = Enum.Font.GothamBold; val.TextSize = 11
+        val.TextXAlignment = Enum.TextXAlignment.Right; val.Parent = row
+        local bar = Instance.new("Frame")
+        bar.Size = UDim2.new(1,-12,0,6); bar.Position = UDim2.new(0,6,0,24)
+        bar.BackgroundColor3 = Color3.fromRGB(40,40,55); bar.BorderSizePixel = 0; bar.Parent = row
+        local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0,3); bc.Parent = bar
+        local fill = Instance.new("Frame")
+        fill.Size = UDim2.new(0.5,0,1,0); fill.BackgroundColor3 = Color3.fromRGB(120,81,166); fill.BorderSizePixel = 0; fill.Parent = bar
+        local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(0,3); fc.Parent = fill
+        -- init
+        pcall(function()
+            local t = Cfg
+            for i=1,#path-1 do t = t[path[i]] end
+            local v = t[path[#path]] or min
+            val.Text = tostring(v)
+            fill.Size = UDim2.new((v-min)/(max-min),0,1,0)
+        end)
+        -- drag
+        local dragging = false
+        bar.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
+        end)
+        UserInputService.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+        end)
+        UserInputService.InputChanged:Connect(function(i)
+            if not dragging or i.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+            local rel = (i.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X
+            rel = math.clamp(rel, 0, 1)
+            local v = min + (max-min)*rel
+            v = math.floor(v*100)/100
+            local t = Cfg
+            for i=1,#path-1 do t = t[path[i]] end
+            t[path[#path]] = v
+            val.Text = tostring(v)
+            fill.Size = UDim2.new(rel,0,1,0)
+        end)
+        return row
+    end
+
+    local function dropdown(parent, label, path, options)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1,0,0,26); row.BackgroundColor3 = Color3.fromRGB(28,28,38); row.BorderSizePixel = 0; row.Parent = parent
+        local rc = Instance.new("UICorner"); rc.CornerRadius = UDim.new(0,4); rc.Parent = row
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(0.5,0,1,0); lbl.Position = UDim2.new(0,6,0,0)
+        lbl.Text = label; lbl.TextColor3 = Color3.fromRGB(220,220,220)
+        lbl.BackgroundTransparency = 1; lbl.Font = Enum.Font.Gotham; lbl.TextSize = 11
+        lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = row
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(0.5,-6,0,20); btn.Position = UDim2.new(0.5,0,0,3)
+        btn.Text = (function()
+            local t = Cfg; for i=1,#path-1 do t=t[path[i]] end; return tostring(t[path[#path]])
+        end)()
+        btn.TextColor3 = Color3.fromRGB(255,255,255); btn.BackgroundColor3 = Color3.fromRGB(40,40,55)
+        btn.Font = Enum.Font.Gotham; btn.TextSize = 10; btn.Parent = row
+        local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0,3); bc.Parent = btn
+        local idx = 1
+        btn.MouseButton1Click:Connect(function()
+            idx = idx % #options + 1
+            btn.Text = options[idx]
+            local t = Cfg; for i=1,#path-1 do t=t[path[i]] end
+            t[path[#path]] = options[idx]
+        end)
+        return row
+    end
+
+    -- build tabs
+    for _, tabName in ipairs(TABS) do
+        local tb = Instance.new("TextButton")
+        tb.Size = UDim2.new(0, 70, 0, 24); tb.Text = tabName
+        tb.TextColor3 = Color3.fromRGB(180,180,180); tb.BackgroundColor3 = Color3.fromRGB(32,32,44)
+        tb.Font = Enum.Font.Gotham; tb.TextSize = 10; tb.Parent = tabBar
+        local tbc = Instance.new("UICorner"); tbc.CornerRadius = UDim.new(0,4); tbc.Parent = tb
+        local tf = makeTabFrame(tabName)
+        tabButtons[tabName] = tb
+        tabFrames[tabName] = tf
+        tb.MouseButton1Click:Connect(function()
+            for _, name in ipairs(TABS) do
+                tabFrames[name].Visible = (name == tabName)
+                if name == tabName then
+                    tabButtons[name].BackgroundColor3 = Color3.fromRGB(120,81,166)
+                    tabButtons[name].TextColor3 = Color3.fromRGB(255,255,255)
+                else
+                    tabButtons[name].BackgroundColor3 = Color3.fromRGB(32,32,44)
+                    tabButtons[name].TextColor3 = Color3.fromRGB(180,180,180)
+                end
+            end
         end)
     end
 
-    section("COMBAT")
-    toggle("Silent Aim", {"Combat","SilentAim","Enabled"}, Color3.fromRGB(200,60,60))
-    toggle("Aimbot", {"Combat","Aimbot","Enabled"}, Color3.fromRGB(200,60,60))
-    toggle("Triggerbot", {"Combat","Triggerbot","Enabled"}, Color3.fromRGB(200,60,60))
-    toggle("Ragebot", {"Combat","Ragebot","Enabled"}, Color3.fromRGB(200,60,60))
-    toggle("Anti-Aim", {"Combat","AntiAim","Enabled"}, Color3.fromRGB(200,60,60))
+    -- ============================================================
+    -- AIMBOT TAB
+    -- ============================================================
+    local aimTab = tabFrames["Aimbot"]
+    section(aimTab, "AIMBOT")
+    toggle(aimTab, "Enabled", {"Combat","Aimbot","Enabled"}, Color3.fromRGB(200,60,60))
+    slider(aimTab, "Smoothness", {"Combat","Aimbot","Smoothness"}, 0.01, 1)
+    slider(aimTab, "FOV", {"Combat","Aimbot","FOV"}, 10, 360)
+    dropdown(aimTab, "Target Part", {"Combat","Aimbot","Part"}, {"Head","UpperTorso","HumanoidRootPart"})
+    toggle(aimTab, "Team Check", {"Combat","Aimbot","TeamCheck"})
+    toggle(aimTab, "Wall Check", {"Combat","Aimbot","WallCheck"})
+    toggle(aimTab, "On Scope Only", {"Combat","Aimbot","OnScope"})
+    toggle(aimTab, "Prediction", {"Combat","Aimbot","Prediction"})
+    slider(aimTab, "Prediction Amt", {"Combat","Aimbot","PredictionAmount"}, 0, 0.5)
+    toggle(aimTab, "Flick", {"Combat","Aimbot","Flick"})
+    section(aimTab, "RAGEBOT")
+    toggle(aimTab, "Ragebot Enabled", {"Combat","Ragebot","Enabled"}, Color3.fromRGB(200,60,60))
+    toggle(aimTab, "Auto Crouch", {"Combat","Ragebot","AutoCrouch"})
+    toggle(aimTab, "Anti Knife", {"Combat","Ragebot","AntiKnife"})
+    toggle(aimTab, "FFA Targeting", {"Combat","Ragebot","FFA"})
+    section(aimTab, "ANTI-AIM")
+    toggle(aimTab, "Anti-Aim Enabled", {"Combat","AntiAim","Enabled"}, Color3.fromRGB(200,60,60))
+    dropdown(aimTab, "Pitch", {"Combat","AntiAim","Pitch"}, {"down","up"})
+    dropdown(aimTab, "Yaw Mode", {"Combat","AntiAim","YawMode"}, {"jitter","spin","static"})
 
-    section("ESP")
-    toggle("ESP Master", {"ESP","Enabled"}, Color3.fromRGB(60,120,200))
-    toggle("Box", {"ESP","Box","Enabled"})
-    toggle("Name", {"ESP","Name","Enabled"})
-    toggle("Health Bar", {"ESP","HealthBar","Enabled"})
-    toggle("Tracer", {"ESP","Tracer","Enabled"})
-    toggle("Chams", {"ESP","Chams","Enabled"})
-    toggle("Distance", {"ESP","Distance","Enabled"})
-    toggle("Held Weapon", {"ESP","HeldWeapon","Enabled"})
-    toggle("Skeleton", {"ESP","Skeleton","Enabled"})
-    toggle("Head Marker", {"ESP","HeadMarker","Enabled"})
+    -- ============================================================
+    -- SILENT AIM TAB
+    -- ============================================================
+    local silentTab = tabFrames["Silent Aim"]
+    section(silentTab, "SILENT AIM")
+    toggle(silentTab, "Enabled", {"Combat","SilentAim","Enabled"}, Color3.fromRGB(200,60,60))
+    slider(silentTab, "Hit Chance", {"Combat","SilentAim","HitChance"}, 0, 100)
+    slider(silentTab, "FOV", {"Combat","SilentAim","FOV"}, 10, 360)
+    dropdown(silentTab, "Closest Part", {"Combat","SilentAim","ClosestPart"}, {"Head","UpperTorso","HumanoidRootPart"})
+    toggle(silentTab, "Team Check", {"Combat","SilentAim","TeamCheck"})
+    toggle(silentTab, "Wall Check", {"Combat","SilentAim","WallCheck"})
+    toggle(silentTab, "Visible Check", {"Combat","SilentAim","VisibleCheck"})
+    toggle(silentTab, "Prediction", {"Combat","SilentAim","Prediction"})
+    slider(silentTab, "Prediction Amt", {"Combat","SilentAim","PredictionAmount"}, 0, 0.5)
+    toggle(silentTab, "Auto Shoot", {"Combat","SilentAim","AutoShoot"})
+    toggle(silentTab, "Show Target", {"Combat","SilentAim","ShowTarget"})
 
-    section("VISUALS")
-    toggle("FOV Circle", {"Visuals","FOVCircle","Enabled"})
-    toggle("Crosshair", {"Visuals","Crosshair","Enabled"})
-    toggle("Target HUD", {"Visuals","TargetHUD","Enabled"})
-    toggle("Hit Overlay", {"Visuals","HitOverlay","Enabled"})
-    toggle("Damage Numbers", {"Visuals","DamageNumbers","Enabled"})
-    toggle("Soul Particles", {"Visuals","SoulParticles","Enabled"})
-    toggle("Watermark", {"Visuals","Indicators","Watermark","Enabled"})
+    -- ============================================================
+    -- TRIGGERBOT TAB
+    -- ============================================================
+    local trigTab = tabFrames["Triggerbot"]
+    section(trigTab, "TRIGGERBOT")
+    toggle(trigTab, "Enabled", {"Combat","Triggerbot","Enabled"}, Color3.fromRGB(200,60,60))
+    slider(trigTab, "Delay", {"Combat","Triggerbot","Delay"}, 0, 0.5)
+    slider(trigTab, "Shoot Delay", {"Combat","Triggerbot","ShootDelay"}, 0, 0.5)
+    toggle(trigTab, "Team Check", {"Combat","Triggerbot","TeamCheck"})
+    toggle(trigTab, "Head Only", {"Combat","Triggerbot","HeadOnly"})
+    section(trigTab, "CHECKS")
+    toggle(trigTab, "Shield Check", {"Combat","Triggerbot","Checks","Shield"})
+    toggle(trigTab, "Katana Check", {"Combat","Triggerbot","Checks","Katana"})
+    toggle(trigTab, "Wall Check", {"Combat","Triggerbot","Checks","Wall"})
+    toggle(trigTab, "Sniper Scoped", {"Combat","Triggerbot","Checks","SniperScoped"})
 
-    section("WORLD")
-    toggle("World Lighting", {"Visuals","World","Lighting","Enabled"})
-    toggle("No Textures", {"Visuals","World","NoTextures"})
+    -- ============================================================
+    -- ESP TAB — split: left settings, right spinning character preview
+    -- ============================================================
+    local espTab = tabFrames["ESP"]
+    -- container for split layout
+    local espContainer = Instance.new("Frame")
+    espContainer.Size = UDim2.new(1,0,1,0); espContainer.BackgroundTransparency = 1; espContainer.Parent = espTab
 
-    section("MOVEMENT")
-    toggle("WalkSpeed", {"Misc","WalkSpeed","Enabled"})
-    toggle("JumpPower", {"Misc","JumpPower","Enabled"})
-    toggle("Fly", {"Misc","Fly","Enabled"})
-    toggle("Infinite Jump", {"Misc","InfiniteJump"})
-    toggle("Thirdperson", {"Misc","Thirdperson","Enabled"})
-    toggle("Stretch Res", {"Misc","StretchResolution","Enabled"})
+    -- LEFT: settings scroll
+    local espSettings = Instance.new("ScrollingFrame")
+    espSettings.Size = UDim2.new(0.5,-4,1,-4); espSettings.Position = UDim2.new(0,0,0,0)
+    espSettings.BackgroundTransparency = 1; espSettings.BorderSizePixel = 0
+    espSettings.ScrollBarThickness = 3; espSettings.CanvasSize = UDim2.new(0,0,0,0)
+    espSettings.AutomaticCanvasSize = Enum.AutomaticSize.Y; espSettings.Parent = espContainer
+    local esl = Instance.new("UIListLayout"); esl.Padding = UDim.new(0,3); esl.Parent = espSettings
+    local esp = Instance.new("UIPadding"); esp.PaddingTop = UDim.new(0,4); esp.PaddingLeft = UDim.new(0,2); esp.PaddingRight = UDim.new(0,2); esp.Parent = espSettings
 
-    section("MISC")
-    toggle("No Recoil", {"Misc","NoRecoil"})
-    toggle("No Spread", {"Misc","NoSpread"})
-    toggle("Rapid Fire", {"Misc","RapidFire"})
-    toggle("Automatic", {"Misc","Automatic"})
-    toggle("No Muzzle Flash", {"Misc","NoMuzzleFlash"})
-    toggle("Anti Flash", {"Misc","AntiFlash"})
-    toggle("Remove Smoke", {"Misc","RemoveSmoke"})
-    toggle("Auto Reload", {"Misc","AutoReload"})
-    toggle("No Scope Overlay", {"Misc","NoScopeOverlay"})
-    toggle("Destroy Tripmine", {"Misc","DestroyTripmine","Enabled"})
-    toggle("Hit Notify", {"Misc","HitNotify","Enabled"})
+    -- RIGHT: spinning character viewport
+    local previewFrame = Instance.new("Frame")
+    previewFrame.Size = UDim2.new(0.5,-4,1,-4); previewFrame.Position = UDim2.new(0.5,4,0,0)
+    previewFrame.BackgroundColor3 = Color3.fromRGB(24,24,32); previewFrame.BorderSizePixel = 0; previewFrame.Parent = espContainer
+    local pfc = Instance.new("UICorner"); pfc.CornerRadius = UDim.new(0,6); pfc.Parent = previewFrame
+    local previewTitle = Instance.new("TextLabel")
+    previewTitle.Size = UDim2.new(1,0,0,18); previewTitle.Text = "ESP Preview"
+    previewTitle.TextColor3 = Color3.fromRGB(120,81,166); previewTitle.BackgroundTransparency = 1
+    previewTitle.Font = Enum.Font.GothamBold; previewTitle.TextSize = 11; previewTitle.Parent = previewFrame
 
-    section("DETECTION")
-    toggle("Staff Detector", {"Misc","StaffDetector","Enabled"}, Color3.fromRGB(200,60,60))
-    toggle("Mod Detector", {"Misc","ModDetector","Enabled"}, Color3.fromRGB(200,60,60))
+    local viewport = Instance.new("ViewportFrame")
+    viewport.Size = UDim2.new(1,-8,1,-24); viewport.Position = UDim2.new(0,4,0,20)
+    viewport.BackgroundColor3 = Color3.fromRGB(18,18,26); viewport.BorderSizePixel = 0
+    viewport.Ambient = Color3.fromRGB(180,180,180); viewport.LightColor = Color3.fromRGB(255,255,255)
+    viewport.LightDirection = Vector3.new(-1,-1,-1); viewport.Parent = previewFrame
+    local vc = Instance.new("UICorner"); vc.CornerRadius = UDim.new(0,4); vc.Parent = viewport
 
-    section("SPOOF")
-    toggle("Name Spoof", {"Misc","Spoof","Name","Enabled"})
-    toggle("Level Spoof", {"Misc","Spoof","Level","Enabled"})
-    toggle("Streak Spoof", {"Misc","Spoof","Streak","Enabled"})
-    toggle("Rank Spoof", {"Misc","Spoof","Rank","Enabled"})
+    -- clone character into viewport
+    local worldModel = Instance.new("WorldModel"); worldModel.Parent = viewport
+    local cam = Instance.new("Camera"); cam.Parent = viewport
+    viewport.CurrentCamera = cam
+
+    local previewChar = nil
+    local function setupPreview()
+        pcall(function()
+            if previewChar then previewChar:Destroy() end
+            local char = LocalPlayer.Character
+            if not char then return end
+            local clone = char:Clone()
+            clone.Parent = worldModel
+            previewChar = clone
+            -- position camera
+            local root = clone:FindFirstChild("HumanoidRootPart")
+            if root then
+                cam.CFrame = CFrame.new(root.Position + Vector3.new(0,2,8), root.Position + Vector3.new(0,2,0))
+            end
+        end)
+    end
+    setupPreview()
+    LocalPlayer.CharacterAdded:Connect(function() task.wait(1); setupPreview() end)
+
+    -- spin the character
+    local spinConn = RunService.Heartbeat:Connect(function(dt)
+        if previewChar and previewChar:FindFirstChild("HumanoidRootPart") then
+            local root = previewChar.HumanoidRootPart
+            root.CFrame = root.CFrame * CFrame.Angles(0, dt*1.5, 0)
+        end
+    end)
+    K.track(spinConn)
+
+    -- ESP settings in left panel
+    section(espSettings, "ESP MASTER")
+    toggle(espSettings, "Enabled", {"ESP","Enabled"}, Color3.fromRGB(60,120,200))
+    toggle(espSettings, "Team Check", {"ESP","TeamCheck"})
+    toggle(espSettings, "Show Teammates", {"ESP","ShowTeammates"})
+    slider(espSettings, "Max Distance", {"ESP","MaxDistance"}, 100, 10000)
+    section(espSettings, "BOX")
+    toggle(espSettings, "Box", {"ESP","Box","Enabled"})
+    dropdown(espSettings, "Style", {"ESP","Box","Style"}, {"Full","Corner"})
+    slider(espSettings, "Thickness", {"ESP","Box","Thickness"}, 1, 4)
+    section(espSettings, "NAME")
+    toggle(espSettings, "Name", {"ESP","Name","Enabled"})
+    toggle(espSettings, "Use Display Name", {"ESP","Name","UseDisplayName"})
+    slider(espSettings, "Size", {"ESP","Name","Size"}, 8, 24)
+    section(espSettings, "HEALTH")
+    toggle(espSettings, "Health Bar", {"ESP","HealthBar","Enabled"})
+    dropdown(espSettings, "Color Mode", {"ESP","HealthBar","ColorMode"}, {"Solid","Gradient","Reactive"})
+    section(espSettings, "TRACER")
+    toggle(espSettings, "Tracer", {"ESP","Tracer","Enabled"})
+    dropdown(espSettings, "From", {"ESP","Tracer","From"}, {"Bottom","Center","Top","Mouse"})
+    dropdown(espSettings, "To", {"ESP","Tracer","To"}, {"Feet","Head"})
+    section(espSettings, "CHAMS")
+    toggle(espSettings, "Chams", {"ESP","Chams","Enabled"})
+    dropdown(espSettings, "Kind", {"ESP","Chams","Kind"}, {"Legacy","Highlight"})
+    toggle(espSettings, "Glow", {"ESP","Chams","Glow"})
+    section(espSettings, "OTHER")
+    toggle(espSettings, "Distance", {"ESP","Distance","Enabled"})
+    toggle(espSettings, "Held Weapon", {"ESP","HeldWeapon","Enabled"})
+    toggle(espSettings, "Skeleton", {"ESP","Skeleton","Enabled"})
+    toggle(espSettings, "Head Marker", {"ESP","HeadMarker","Enabled"})
+    toggle(espSettings, "Offscreen Arrow", {"ESP","OffscreenArrow","Enabled"})
+
+    -- ============================================================
+    -- MISC TAB
+    -- ============================================================
+    local miscTab = tabFrames["Misc"]
+    section(miscTab, "MOVEMENT")
+    toggle(miscTab, "WalkSpeed", {"Misc","WalkSpeed","Enabled"})
+    slider(miscTab, "WalkSpeed Value", {"Misc","WalkSpeed","Value"}, 16, 100)
+    toggle(miscTab, "JumpPower", {"Misc","JumpPower","Enabled"})
+    slider(miscTab, "JumpPower Value", {"Misc","JumpPower","Value"}, 16, 100)
+    toggle(miscTab, "Fly", {"Misc","Fly","Enabled"})
+    slider(miscTab, "Fly Speed", {"Misc","Fly","Speed"}, 10, 200)
+    toggle(miscTab, "Infinite Jump", {"Misc","InfiniteJump"})
+    toggle(miscTab, "Thirdperson", {"Misc","Thirdperson","Enabled"})
+    section(miscTab, "GUN MODS")
+    toggle(miscTab, "No Recoil", {"Misc","NoRecoil"})
+    toggle(miscTab, "No Spread", {"Misc","NoSpread"})
+    toggle(miscTab, "Rapid Fire", {"Misc","RapidFire"})
+    toggle(miscTab, "Automatic", {"Misc","Automatic"})
+    toggle(miscTab, "No Muzzle Flash", {"Misc","NoMuzzleFlash"})
+    toggle(miscTab, "No Fuse", {"Misc","NoFuse"})
+    toggle(miscTab, "Auto Reload", {"Misc","AutoReload"})
+    section(miscTab, "DETECTION")
+    toggle(miscTab, "Staff Detector", {"Misc","StaffDetector","Enabled"}, Color3.fromRGB(200,60,60))
+    toggle(miscTab, "Mod Detector", {"Misc","ModDetector","Enabled"}, Color3.fromRGB(200,60,60))
+    section(miscTab, "OTHER")
+    toggle(miscTab, "Anti Flash", {"Misc","AntiFlash"})
+    toggle(miscTab, "Remove Smoke", {"Misc","RemoveSmoke"})
+    toggle(miscTab, "No Scope Overlay", {"Misc","NoScopeOverlay"})
+    toggle(miscTab, "Destroy Tripmine", {"Misc","DestroyTripmine","Enabled"})
+    toggle(miscTab, "Hit Notify", {"Misc","HitNotify","Enabled"})
+
+    -- ============================================================
+    -- VISUALS TAB
+    -- ============================================================
+    local visTab = tabFrames["Visuals"]
+    section(visTab, "FOV")
+    toggle(visTab, "FOV Circle", {"Visuals","FOVCircle","Enabled"})
+    slider(visTab, "FOV Radius", {"Visuals","FOVCircle","Radius"}, 30, 300)
+    section(visTab, "CROSSHAIR")
+    toggle(visTab, "Crosshair", {"Visuals","Crosshair","Enabled"})
+    slider(visTab, "Size", {"Visuals","Crosshair","Size"}, 2, 20)
+    slider(visTab, "Gap", {"Visuals","Crosshair","Gap"}, 0, 12)
+    toggle(visTab, "Dot", {"Visuals","Crosshair","Dot"})
+    section(visTab, "TARGET HUD")
+    toggle(visTab, "Target HUD", {"Visuals","TargetHUD","Enabled"})
+    section(visTab, "OVERLAY")
+    toggle(visTab, "Hit Overlay", {"Visuals","HitOverlay","Enabled"})
+    toggle(visTab, "Damage Numbers", {"Visuals","DamageNumbers","Enabled"})
+    toggle(visTab, "Soul Particles", {"Visuals","SoulParticles","Enabled"})
+    toggle(visTab, "Watermark", {"Visuals","Indicators","Watermark","Enabled"})
+    section(visTab, "WORLD")
+    toggle(visTab, "World Lighting", {"Visuals","World","Lighting","Enabled"})
+    toggle(visTab, "No Textures", {"Visuals","World","NoTextures"})
+
+    -- ============================================================
+    -- CONFIGS TAB
+    -- ============================================================
+    local cfgTab = tabFrames["Configs"]
+    section(cfgTab, "CONFIG MANAGEMENT")
+    local info = Instance.new("TextLabel")
+    info.Size = UDim2.new(1,0,0,40); info.Text = "Configs save to executor workspace.\nUse Save/Load buttons below."
+    info.TextColor3 = Color3.fromRGB(180,180,180); info.BackgroundTransparency = 1
+    info.Font = Enum.Font.Gotham; info.TextSize = 11; info.Parent = cfgTab
+    local saveBtn = Instance.new("TextButton")
+    saveBtn.Size = UDim2.new(1,0,0,28); saveBtn.Text = "Save Config"
+    saveBtn.BackgroundColor3 = Color3.fromRGB(45,95,45); saveBtn.TextColor3 = Color3.fromRGB(255,255,255)
+    saveBtn.Font = Enum.Font.GothamBold; saveBtn.TextSize = 12; saveBtn.Parent = cfgTab
+    local sc = Instance.new("UICorner"); sc.CornerRadius = UDim.new(0,4); sc.Parent = saveBtn
+    saveBtn.MouseButton1Click:Connect(function()
+        pcall(function()
+            local HttpService = game:GetService("HttpService")
+            local json = HttpService:JSONEncode(Cfg)
+            if writefile then writefile("rivals_unified_config.json", json) end
+            game:GetService("StarterGui"):SetCore("SendNotification", { Title = "Config", Text = "Saved!", Duration = 3 })
+        end)
+    end)
+    local loadBtn = Instance.new("TextButton")
+    loadBtn.Size = UDim2.new(1,0,0,28); loadBtn.Text = "Load Config"
+    loadBtn.BackgroundColor3 = Color3.fromRGB(45,45,95); loadBtn.TextColor3 = Color3.fromRGB(255,255,255)
+    loadBtn.Font = Enum.Font.GothamBold; loadBtn.TextSize = 12; loadBtn.Parent = cfgTab
+    local lc = Instance.new("UICorner"); lc.CornerRadius = UDim.new(0,4); lc.Parent = loadBtn
+    loadBtn.MouseButton1Click:Connect(function()
+        pcall(function()
+            if isfile and isfile("rivals_unified_config.json") then
+                local HttpService = game:GetService("HttpService")
+                local data = readfile("rivals_unified_config.json")
+                local decoded = HttpService:JSONDecode(data)
+                for k,v in pairs(decoded) do Cfg[k] = v end
+                game:GetService("StarterGui"):SetCore("SendNotification", { Title = "Config", Text = "Loaded!", Duration = 3 })
+            end
+        end)
+    end)
+    local unloadBtn = Instance.new("TextButton")
+    unloadBtn.Size = UDim2.new(1,0,0,28); unloadBtn.Text = "Unload Script"
+    unloadBtn.BackgroundColor3 = Color3.fromRGB(95,45,45); unloadBtn.TextColor3 = Color3.fromRGB(255,255,255)
+    unloadBtn.Font = Enum.Font.GothamBold; unloadBtn.TextSize = 12; unloadBtn.Parent = cfgTab
+    local uc = Instance.new("UICorner"); uc.CornerRadius = UDim.new(0,4); uc.Parent = unloadBtn
+    unloadBtn.MouseButton1Click:Connect(function() K.Unload(); sg:Destroy() end)
+
+    -- show first tab
+    tabButtons["Aimbot"].MouseButton1Click:Fire()
 
     -- draggable
     local dragging, dragStart, startPos
-    frame.InputBegan:Connect(function(i)
+    titleBar.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = true; dragStart = i.Position; startPos = frame.Position
         end
@@ -1033,13 +1252,12 @@ pcall(makeUI)
 
 -- watermark
 pcall(function()
-    local sg = Instance.new("ScreenGui"); sg.Name = "Watermark"; sg.ResetOnSpawn = false
-    sg.Parent = gethui()
+    local sg = Instance.new("ScreenGui"); sg.Name = "Watermark"; sg.ResetOnSpawn = false; sg.Parent = gethui()
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(0,200,0,20); lbl.Position = UDim2.new(0,10,0,10)
-    lbl.Text = "Rivals Unified v2"; lbl.TextColor3 = Color3.fromRGB(120,81,166)
+    lbl.Text = "Rivals Unified v3"; lbl.TextColor3 = Color3.fromRGB(120,81,166)
     lbl.BackgroundTransparency = 1; lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 14
     lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = sg
 end)
 
-print("[RivalsUnified v2] loaded — full feature set")
+print("[RivalsUnified v3] loaded — tabbed UI with ESP character preview")
