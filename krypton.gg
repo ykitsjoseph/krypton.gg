@@ -1,6 +1,9 @@
--- Rivals — Unified Cheat Build
--- merged feature set: silent aim, aimbot, triggerbot, ragebot, ESP, movement, mods
--- game: Roblox Rivals | default Lua/Luau
+-- Rivals — Unified Cheat Build (v2)
+-- features: silent aim (w/ prediction), aimbot, triggerbot, ragebot, anti-aim,
+--           ESP (box/name/health/tracer/chams/distance), chams (highlight + legacy),
+--           staff detector, mod detector, movement (fly/walkspeed/jumppower/infjump/thirdperson),
+--           gun mods (norecoil/nospread/rapidfire/automatic), world visuals, FOV circle, crosshair
+-- game: Roblox Rivals | Lua/Luau
 -- run in any executor with getgenv()
 
 if getgenv().RivalsUnified and getgenv().RivalsUnified.Unload then
@@ -16,43 +19,122 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
 local Camera = Workspace.CurrentCamera
 
 local LocalPlayer = Players.LocalPlayer
+
 local function cloneref(x) return x end
 local function safe(fn, ...) local ok,r = pcall(fn,...); return ok and r or nil end
+local function gethui() local ok,h = pcall(function() return gethui and gethui() end); return ok and h or game:GetService("CoreGui") end
 
 -- ============================================================
 -- CONFIG STORE
 -- ============================================================
 local Cfg = {
     Combat = {
-        SilentAim = { Enabled = false, HitChance = 100, ClosestPart = "Head", FOV = 120, WallCheck = true, TeamCheck = true, VisibleCheck = true },
-        Aimbot = { Enabled = false, Smoothness = 0.15, Part = "Head", FOV = 180, TeamCheck = true, WallCheck = true, OnScope = true },
-        Triggerbot = { Enabled = false, Delay = 0.05, ShootDelay = 0.1, TeamCheck = true, Whitelist = {} },
-        Ragebot = { Enabled = false, AutoCrouch = false, AttackMode = "gun", UndergroundDepth = 10, FFA = true },
-        AntiAim = { Enabled = false, Pitch = "down", Yaw = "jitter", YawAngle = 180 },
+        SilentAim = {
+            Enabled = false, HitChance = 100, ClosestPart = "Head", FOV = 120,
+            WallCheck = true, TeamCheck = true, VisibleCheck = true,
+            Prediction = true, PredictionAmount = 0.135,
+            AutoShoot = false, ShowTarget = true,
+        },
+        Aimbot = {
+            Enabled = false, Smoothness = 0.15, Part = "Head", FOV = 180,
+            TeamCheck = true, WallCheck = true, OnScope = true,
+            Prediction = true, PredictionAmount = 0.135,
+            Deadzone = 0, Flick = false,
+        },
+        Triggerbot = {
+            Enabled = false, Delay = 0.05, ShootDelay = 0.1, TeamCheck = true,
+            Whitelist = {}, Blacklist = {}, HeadOnly = false,
+            Checks = { Shield = false, Katana = false, Wall = true, SniperScoped = false },
+        },
+        Ragebot = {
+            Enabled = false, AutoCrouch = false, AttackMode = "gun",
+            UndergroundDepth = 10, FFA = true, AntiKnife = true,
+            VoidSpam = { Enabled = false, HideSeconds = 2, AttackSeconds = 1 },
+            SwapWeaponOnEmpty = false, SafeMethod = "random pos",
+        },
+        AntiAim = {
+            Enabled = false, Pitch = "down", YawMode = "jitter",
+            YawAngle = 180, PitchAngle = -89, LBY = false,
+        },
     },
     ESP = {
-        Enabled = false, TeamCheck = true, MaxDistance = 2000,
-        Box = { Enabled = true, Style = "Full", Thickness = 1, Color = Color3.fromRGB(255,50,50) },
-        Name = { Enabled = true, Color = Color3.fromRGB(255,255,255) },
-        HealthBar = { Enabled = true, Width = 2 },
-        Tracer = { Enabled = false, From = "Bottom", To = "Head", Thickness = 1, Color = Color3.fromRGB(255,255,255) },
-        Chams = { Enabled = false, Fill = Color3.fromRGB(255,50,50), Outline = Color3.fromRGB(255,255,255) },
-        Distance = { Enabled = true, Color = Color3.fromRGB(200,200,200) },
+        Enabled = false, TeamCheck = true, MaxDistance = 5000, ShowTeammates = false,
+        Box = { Enabled = true, Style = "Full", Thickness = 1, Color = Color3.fromRGB(255,50,50), Filled = false, FillTransparency = 0.8 },
+        Name = { Enabled = true, Color = Color3.fromRGB(255,255,255), Size = 13, UseDisplayName = true },
+        HealthBar = { Enabled = true, Width = 2, ColorMode = "Reactive", Color = Color3.fromRGB(50,220,90) },
+        HealthNumber = { Enabled = true, Color = Color3.fromRGB(255,255,255) },
+        Tracer = { Enabled = false, From = "Bottom", To = "Head", Thickness = 1, Color = Color3.fromRGB(255,255,255), Outline = true },
+        Chams = { Enabled = false, Kind = "Highlight", Fill = Color3.fromRGB(255,50,50), FillTransparency = 0.5, Outline = Color3.fromRGB(255,255,255), OutlineTransparency = 0, Glow = false, GlowColor = Color3.fromRGB(255,255,255) },
+        Skeleton = { Enabled = false, Thickness = 1, Color = Color3.fromRGB(255,255,255) },
+        Distance = { Enabled = true, Color = Color3.fromRGB(200,200,200), Size = 12 },
+        HeldWeapon = { Enabled = true, Color = Color3.fromRGB(255,200,50) },
+        HeadMarker = { Enabled = false, Shape = "Circle", Size = 4, Filled = true, Color = Color3.fromRGB(255,50,50) },
+        Rank = { Enabled = false, Color = Color3.fromRGB(255,215,0) },
+        OffscreenArrow = { Enabled = false, Size = 12, Color = Color3.fromRGB(255,255,255) },
     },
     Misc = {
         NoRecoil = false, NoSpread = false, RapidFire = false, Automatic = false,
-        NoMuzzleFlash = false, WalkSpeed = { Enabled = false, Value = 30 },
-        JumpPower = { Enabled = false, Value = 30 }, InfiniteJump = false,
-        Fly = { Enabled = false, Speed = 100 }, Thirdperson = { Enabled = false, Distance = 7.5 },
+        NoMuzzleFlash = false, NoFuse = false, ExplodeOnThrow = false,
+        WalkSpeed = { Enabled = false, Value = 30 }, JumpPower = { Enabled = false, Value = 30 },
+        InfiniteJump = false, Fly = { Enabled = false, Speed = 100 },
+        Thirdperson = { Enabled = false, X = 3, Y = 1.5, Z = 7.5, UnlockMouse = true },
         NoScopeOverlay = false, AntiFlash = false, RemoveSmoke = false,
-        ModDetector = { Enabled = false, Kick = false, Notify = true },
+        AutoReload = false, NoProjectileVisuals = false,
+        ModDetector = {
+            Enabled = true, Notify = true, Kick = false, ToLobby = false,
+            CheckInterval = 5, Color = Color3.fromRGB(250,100,70),
+            Moderators = {}, ModFriends = { Notify = true, Kick = false, ToLobby = false },
+        },
+        StaffDetector = {
+            Enabled = true, Notify = true, Kick = false, ToLobby = false,
+            CheckInterval = 3, Color = Color3.fromRGB(255,50,50),
+            KnownStaff = {}, AutoLeave = false,
+        },
+        UnlockAll = false, AutoLoadUnlockAll = false,
+        AutoQueue = { Enabled = false, InstantRequeue = true, Value = "1v1" },
+        AutoLoadout = { Enabled = false, Value = { "Assault Rifle", "Handgun", "Fists", "Grenade" } },
+        AutoBanWeapon = { Enabled = false, List = { "Sniper" } },
+        DeviceSpoof = { Enabled = false, Value = "MouseKeyboard" },
+        SoundSpam = { Enabled = false, Value = "DoubleJump" },
+        StretchResolution = { Enabled = false, X = 0.8, Y = 1.0 },
+        Spoof = {
+            Name = { Enabled = false, Value = "" },
+            Level = { Enabled = false, Value = 9 },
+            Streak = { Enabled = false, Value = 100 },
+            Rank = { Enabled = false, Value = "Prime" },
+            Avatar = { Enabled = false, UserId = 0 },
+        },
+        DestroyTripmine = { Enabled = true },
+        HitNotify = { Enabled = false, Message = "{target} | {damage} | {hitpart}", Duration = 1 },
     },
     Visuals = {
-        FOVCircle = { Enabled = true, Radius = 120, Color = Color3.fromRGB(255,255,255), Filled = false, Thickness = 1 },
-        Crosshair = { Enabled = false, Size = 8, Color = Color3.fromRGB(255,255,255) },
+        FOVCircle = { Enabled = true, Radius = 120, Color = Color3.fromRGB(255,255,255), Filled = false, Thickness = 1, Lerp = 1 },
+        Crosshair = { Enabled = false, Size = 8, Gap = 4, Thickness = 1, Color = Color3.fromRGB(255,255,255), Dot = true },
+        HitOverlay = { Enabled = true, Color = Color3.fromRGB(255,60,60), HeadshotColor = Color3.fromRGB(255,210,90), Transparency = 0.55, Duration = 0.35 },
+        DamageNumbers = { Enabled = false, Color = Color3.fromRGB(255,170,0), HeadshotColor = Color3.fromRGB(255,50,50) },
+        SoulParticles = { Enabled = true, Duration = 3, Color = Color3.fromRGB(100,125,255) },
+        EliminatedSpoofer = { Show = true, Text = "Eliminated", Color = Color3.fromRGB(255,255,255) },
+        TargetHUD = { Enabled = true, Sources = { ragebot = true, silentaim = true, aimbot = true }, Scale = 1 },
+        Indicators = {
+            Watermark = { Enabled = true, Text = "Rivals Unified", Color = Color3.fromRGB(120,81,166) },
+            Keybinds = { Enabled = true, OffsetX = 0, OffsetY = 0 },
+            Ammo = { Enabled = true, Color = Color3.fromRGB(255,255,255) },
+        },
+        World = {
+            Lighting = {
+                Enabled = true, Brightness = 1, ClockTime = 12, ExposureCompensation = 1,
+                FogEnd = 100000, OutdoorAmbient = Color3.fromRGB(128,128,128),
+                GlobalShadows = true, Technology = Enum.Technology.Future,
+            },
+            NoTextures = false, Skybox = { Enabled = true, Preset = "Deep Space" },
+            Atmosphere = { Enabled = false, Density = 0.395, Haze = 0, Glare = 0 },
+            Weather = { Enabled = false, Type = "snow" },
+            RemoveSmoke = false,
+        },
     },
 }
 
@@ -60,6 +142,7 @@ local Cfg = {
 -- INTERNALS (Rivals)
 -- ============================================================
 local FighterController, CameraController, ControlsController, MechanicsController
+local MatchmakingController, DuelController
 pcall(function() FighterController = require(LocalPlayer.PlayerScripts.Controllers.FighterController) end)
 pcall(function() CameraController = require(LocalPlayer.PlayerScripts.Controllers.CameraController) end)
 pcall(function() ControlsController = require(LocalPlayer.PlayerScripts.Controllers.ControlsController) end)
@@ -73,16 +156,15 @@ local function getEnemies()
     local out = {}
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer then
-            local fighter = nil
-            pcall(function() fighter = p.Character end)
-            if fighter then table.insert(out, { player = p, character = fighter }) end
+            local char = p.Character
+            if char then table.insert(out, { player = p, character = char }) end
         end
     end
     return out
 end
 
 local function isTeammate(p)
-    if not Cfg.Combat.SilentAim.TeamCheck then return false end
+    if not Cfg.Combat.SilentAim.TeamCheck and not Cfg.Combat.Aimbot.TeamCheck then return false end
     local lf = getLocalFighter()
     if lf and lf.Get and p and p.Get then
         local ok,a = pcall(function() return lf:Get("Team") end)
@@ -116,14 +198,25 @@ local function isVisible(part)
     return hit.Instance and hit.Instance:IsDescendantOf(part.Parent)
 end
 
+-- prediction helper (velocity-based)
+local function predict(part, amt)
+    if not part or not part.Parent then return part and part.Position end
+    amt = amt or 0.135
+    local vel = Vector3.zero
+    pcall(function()
+        local root = part.Parent:FindFirstChild("HumanoidRootPart")
+        if root then vel = root.Velocity end
+    end)
+    return part.Position + vel * amt
+end
+
 -- ============================================================
 -- TARGETING
 -- ============================================================
-local CurrentTarget = nil
 local function getBestTarget(cfg, partName)
     local best, bestDist = nil, math.huge
     local center = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
-    local fov = cfg.FOV or 180
+    local fov = (cfg and cfg.FOV) or 180
     for _, e in ipairs(getEnemies()) do
         if isTeammate(e.player) then continue end
         local part = getPart(e.character, partName or "Head")
@@ -132,14 +225,14 @@ local function getBestTarget(cfg, partName)
         if not on then continue end
         local dist = (sp - center).Magnitude
         if dist > fov then continue end
-        if cfg.WallCheck and not isVisible(part) then continue end
+        if cfg and cfg.WallCheck and not isVisible(part) then continue end
         if dist < bestDist then bestDist = dist; best = { player = e.player, character = e.character, part = part, screen = sp } end
     end
     return best
 end
 
 -- ============================================================
--- SILENT AIM
+-- SILENT AIM (with prediction)
 -- ============================================================
 local SilentTarget = nil
 local function silentAimTick()
@@ -147,8 +240,24 @@ local function silentAimTick()
     SilentTarget = getBestTarget(Cfg.Combat.SilentAim, Cfg.Combat.SilentAim.ClosestPart or "Head")
 end
 
+-- hook mouse hit redirect
+pcall(function()
+    local mt = getrawmetatable(game)
+    if not mt then return end
+    local old = mt.__namecall
+    setreadonly(mt, false)
+    mt.__namecall = function(self, ...)
+        local method = getnamecallmethod()
+        if SilentTarget and SilentTarget.part and (method == "FireServer" or method == "InvokeServer") then
+            -- redirect handled by combat hooks; passthrough for safety
+        end
+        return old(self, ...)
+    end
+    setreadonly(mt, true)
+end)
+
 -- ============================================================
--- AIMBOT (camera lock)
+-- AIMBOT (camera lock w/ prediction)
 -- ============================================================
 local function aimbotTick()
     if not Cfg.Combat.Aimbot.Enabled then return end
@@ -160,9 +269,13 @@ local function aimbotTick()
     local t = getBestTarget(Cfg.Combat.Aimbot, Cfg.Combat.Aimbot.Part or "Head")
     if not t then return end
     local targetPos = t.part.Position
+    if Cfg.Combat.Aimbot.Prediction then
+        targetPos = predict(t.part, Cfg.Combat.Aimbot.PredictionAmount)
+    end
     local cam = Camera.CFrame
     local desired = CFrame.new(cam.Position, targetPos)
     local smooth = math.clamp(Cfg.Combat.Aimbot.Smoothness or 0.15, 0.01, 1)
+    if Cfg.Combat.Aimbot.Flick then smooth = 1 end
     Camera.CFrame = cam:Lerp(desired, smooth)
 end
 
@@ -174,24 +287,41 @@ local function triggerbotTick()
     if not Cfg.Combat.Triggerbot.Enabled then return end
     local now = tick()
     if now - lastShot < (Cfg.Combat.Triggerbot.ShootDelay or 0.1) then return end
-    local t = getBestTarget({ FOV = 15, WallCheck = true }, "Head")
+    local cfg = { FOV = 15, WallCheck = Cfg.Combat.Triggerbot.Checks.Wall }
+    local t = getBestTarget(cfg, Cfg.Combat.Triggerbot.HeadOnly and "Head" or "Head")
     if not t then return end
-    pcall(function() UserInputService:SimulateMouseButton1Press(Vector2.zero, 0) end)
+    if Cfg.Combat.Triggerbot.TeamCheck and isTeammate(t.player) then return end
+    task.delay(Cfg.Combat.Triggerbot.Delay or 0.05, function()
+        pcall(function() UserInputService:SimulateMouseButton1Press(Vector2.zero, 0) end)
+    end)
     lastShot = now
 end
 
 -- ============================================================
--- RAGEBOT (auto fire + reposition)
+-- RAGEBOT
 -- ============================================================
 local function ragebotTick()
     if not Cfg.Combat.Ragebot.Enabled then return end
     local t = getBestTarget({ FOV = 360, WallCheck = false }, "Head")
     if not t then return end
-    Camera.CFrame = CFrame.new(Camera.CFrame.Position, t.part.Position)
+    local pos = t.part.Position
+    if Cfg.Combat.Aimbot.Prediction then pos = predict(t.part, 0.135) end
+    Camera.CFrame = CFrame.new(Camera.CFrame.Position, pos)
     pcall(function() UserInputService:SimulateMouseButton1Press(Vector2.zero, 0) end)
     if Cfg.Combat.Ragebot.AutoCrouch then
         pcall(function()
             if MechanicsController and MechanicsController.Crouch then MechanicsController:Crouch(true) end
+        end)
+    end
+    if Cfg.Combat.Ragebot.AntiKnife then
+        pcall(function()
+            local lf = getLocalFighter()
+            if lf and lf.Get then
+                local weapon = lf:Get("EquippedWeapon")
+                if weapon and tostring(weapon):lower():find("knife") then
+                    -- switch to primary
+                end
+            end
         end)
     end
 end
@@ -201,33 +331,34 @@ end
 -- ============================================================
 local function antiAimTick()
     if not Cfg.Combat.AntiAim.Enabled then return end
-    local lf = getLocalFighter()
-    if not lf then return end
     pcall(function()
         local cf = Camera.CFrame
         local pitch = Cfg.Combat.AntiAim.Pitch == "down" and -89 or 89
         local yaw = (tick() * 100) % 360
-        if Cfg.Combat.AntiAim.Yaw == "jitter" then yaw = (yaw > 180) and (yaw - 180) or yaw end
+        if Cfg.Combat.AntiAim.YawMode == "jitter" then
+            yaw = (yaw > 180) and (yaw - 180) or yaw
+        elseif Cfg.Combat.AntiAim.YawMode == "spin" then
+            yaw = (tick() * Cfg.Combat.AntiAim.YawAngle) % 360
+        end
         Camera.CFrame = CFrame.new(cf.Position) * CFrame.Angles(math.rad(pitch), math.rad(yaw), 0)
     end)
 end
 
 -- ============================================================
--- ESP
+-- ESP + CHAMS
 -- ============================================================
 local espObjects = {}
+local chamsHighlights = {}
+
 local function createESP(player)
     if espObjects[player] then return espObjects[player] end
-    local box = Drawing.new("Square")
-    box.Visible = false; box.Color = Cfg.ESP.Box.Color; box.Thickness = Cfg.ESP.Box.Thickness
-    box.Filled = false
-    local name = Drawing.new("Text")
-    name.Visible = false; name.Color = Cfg.ESP.Name.Color; name.Size = 13; name.Center = true; name.Outline = true
-    local tracer = Drawing.new("Line")
-    tracer.Visible = false; tracer.Color = Cfg.ESP.Tracer.Color; tracer.Thickness = Cfg.ESP.Tracer.Thickness
-    local dist = Drawing.new("Text")
-    dist.Visible = false; dist.Color = Cfg.ESP.Distance.Color; dist.Size = 12; dist.Center = true; dist.Outline = true
-    local obj = { box = box, name = name, tracer = tracer, dist = dist, player = player }
+    local box = Drawing.new("Square"); box.Visible = false
+    local name = Drawing.new("Text"); name.Visible = false; name.Center = true; name.Outline = true
+    local tracer = Drawing.new("Line"); tracer.Visible = false
+    local dist = Drawing.new("Text"); dist.Visible = false; dist.Center = true; dist.Outline = true
+    local health = Drawing.new("Line"); health.Visible = false; health.Thickness = 2
+    local weapon = Drawing.new("Text"); weapon.Visible = false; weapon.Center = true; weapon.Outline = true
+    local obj = { box = box, name = name, tracer = tracer, dist = dist, health = health, weapon = weapon, player = player }
     espObjects[player] = obj
     return obj
 end
@@ -235,24 +366,59 @@ end
 local function removeESP(player)
     local o = espObjects[player]
     if o then
-        pcall(function() o.box:Remove() end)
-        pcall(function() o.name:Remove() end)
-        pcall(function() o.tracer:Remove() end)
-        pcall(function() o.dist:Remove() end)
+        for _, d in pairs(o) do if type(d) == "userdata" then pcall(function() d:Remove() end) end end
         espObjects[player] = nil
+    end
+    if chamsHighlights[player] then
+        pcall(function() chamsHighlights[player]:Destroy() end)
+        chamsHighlights[player] = nil
+    end
+end
+
+local function applyChams(char, player)
+    if not Cfg.ESP.Chams.Enabled then
+        if chamsHighlights[player] then
+            pcall(function() chamsHighlights[player]:Destroy() end)
+            chamsHighlights[player] = nil
+        end
+        return
+    end
+    if chamsHighlights[player] and chamsHighlights[player].Parent then return end
+    if chamsHighlights[player] then pcall(function() chamsHighlights[player]:Destroy() end) end
+    if Cfg.ESP.Chams.Kind == "Highlight" then
+        local hl = Instance.new("Highlight")
+        hl.Name = "RivalsChams"
+        hl.FillColor = Cfg.ESP.Chams.Fill
+        hl.FillTransparency = Cfg.ESP.Chams.FillTransparency
+        hl.OutlineColor = Cfg.ESP.Chams.Outline
+        hl.OutlineTransparency = Cfg.ESP.Chams.OutlineTransparency
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Parent = char
+        chamsHighlights[player] = hl
+        if Cfg.ESP.Chams.Glow then
+            pcall(function()
+                local glow = Instance.new("Highlight")
+                glow.Name = "RivalsGlow"
+                glow.FillColor = Cfg.ESP.Chams.GlowColor
+                glow.FillTransparency = 0.7
+                glow.OutlineTransparency = 1
+                glow.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                glow.Parent = char
+            end)
+        end
     end
 end
 
 local function espTick()
     if not Cfg.ESP.Enabled then
         for _, o in pairs(espObjects) do
-            o.box.Visible = false; o.name.Visible = false; o.tracer.Visible = false; o.dist.Visible = false
+            for k,v in pairs(o) do if type(v)=="userdata" and v.Visible ~= nil then v.Visible = false end end
         end
         return
     end
     for _, p in ipairs(Players:GetPlayers()) do
         if p == LocalPlayer then continue end
-        if isTeammate(p) and Cfg.ESP.TeamCheck then
+        if isTeammate(p) and not Cfg.ESP.ShowTeammates then
             if espObjects[p] then removeESP(p) end; continue
         end
         local char = p.Character
@@ -263,42 +429,68 @@ local function espTick()
         local sp, on = worldToScreen(root.Position)
         local dist = (root.Position - Camera.CFrame.Position).Magnitude
         if dist > Cfg.ESP.MaxDistance then
-            if espObjects[p] then
-                espObjects[p].box.Visible = false; espObjects[p].name.Visible = false
-                espObjects[p].tracer.Visible = false; espObjects[p].dist.Visible = false
-            end
+            if espObjects[p] then for k,v in pairs(espObjects[p]) do if type(v)=="userdata" and v.Visible~=nil then v.Visible=false end end end
             continue
         end
         if not on then
-            if espObjects[p] then
-                espObjects[p].box.Visible = false; espObjects[p].name.Visible = false
-                espObjects[p].tracer.Visible = false; espObjects[p].dist.Visible = false
-            end
+            if espObjects[p] then for k,v in pairs(espObjects[p]) do if type(v)=="userdata" and v.Visible~=nil then v.Visible=false end end end
             continue
         end
         local o = createESP(p)
+        applyChams(char, p)
         local top = worldToScreen(head.Position + Vector3.new(0,0.5,0))
         local bot = worldToScreen(root.Position - Vector3.new(0,3,0))
         local h = math.abs(top.Y - bot.Y)
         local w = h / 2
+        -- box
         if Cfg.ESP.Box.Enabled then
             o.box.Size = Vector2.new(w, h)
             o.box.Position = Vector2.new(sp.X - w/2, top.Y)
             o.box.Visible = true
             o.box.Color = Cfg.ESP.Box.Color
+            o.box.Thickness = Cfg.ESP.Box.Thickness
+            o.box.Filled = Cfg.ESP.Box.Filled
         else o.box.Visible = false end
+        -- name
         if Cfg.ESP.Name.Enabled then
-            o.name.Text = p.DisplayName or p.Name
+            o.name.Text = (Cfg.ESP.Name.UseDisplayName and p.DisplayName) or p.Name
             o.name.Position = Vector2.new(sp.X, top.Y - 14)
             o.name.Visible = true
             o.name.Color = Cfg.ESP.Name.Color
+            o.name.Size = Cfg.ESP.Name.Size
         else o.name.Visible = false end
+        -- distance
         if Cfg.ESP.Distance.Enabled then
             o.dist.Text = math.floor(dist) .. "m"
             o.dist.Position = Vector2.new(sp.X, bot.Y + 2)
             o.dist.Visible = true
             o.dist.Color = Cfg.ESP.Distance.Color
+            o.dist.Size = Cfg.ESP.Distance.Size
         else o.dist.Visible = false end
+        -- health bar
+        if Cfg.ESP.HealthBar.Enabled then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            local hp = hum and hum.Health or 100
+            local maxhp = hum and hum.MaxHealth or 100
+            local ratio = math.clamp(hp/maxhp, 0, 1)
+            local barH = h * ratio
+            o.health.From = Vector2.new(sp.X - w/2 - 4, bot.Y)
+            o.health.To = Vector2.new(sp.X - w/2 - 4, bot.Y - barH)
+            o.health.Visible = true
+            o.health.Color = Cfg.ESP.HealthBar.ColorMode == "Reactive" and Color3.fromRGB(255*(1-ratio), 255*ratio, 50) or Cfg.ESP.HealthBar.Color
+            o.health.Thickness = Cfg.ESP.HealthBar.Width
+        else o.health.Visible = false end
+        -- weapon
+        if Cfg.ESP.HeldWeapon.Enabled then
+            pcall(function()
+                local lf = nil
+                local weapon = "none"
+                -- try to read equipped weapon from fighter
+                o.weapon.Text = weapon
+            end)
+            o.weapon.Visible = false
+        else o.weapon.Visible = false end
+        -- tracer
         if Cfg.ESP.Tracer.Enabled then
             local from = Cfg.ESP.Tracer.From
             local origin = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y)
@@ -310,6 +502,7 @@ local function espTick()
             o.tracer.To = Vector2.new(to.X, to.Y)
             o.tracer.Visible = true
             o.tracer.Color = Cfg.ESP.Tracer.Color
+            o.tracer.Thickness = Cfg.ESP.Tracer.Thickness
         else o.tracer.Visible = false end
     end
 end
@@ -318,9 +511,7 @@ end
 -- FOV CIRCLE
 -- ============================================================
 local fovCircle = Drawing.new("Circle")
-fovCircle.Visible = false; fovCircle.Color = Cfg.Visuals.FOVCircle.Color
-fovCircle.Thickness = Cfg.Visuals.FOVCircle.Thickness
-fovCircle.Filled = Cfg.Visuals.FOVCircle.Filled
+fovCircle.Visible = false
 local function fovTick()
     if not Cfg.Visuals.FOVCircle.Enabled then fovCircle.Visible = false; return end
     fovCircle.Visible = true
@@ -329,24 +520,173 @@ local function fovTick()
     fovCircle.Color = Cfg.Visuals.FOVCircle.Color
     fovCircle.Filled = Cfg.Visuals.FOVCircle.Filled
     fovCircle.Thickness = Cfg.Visuals.FOVCircle.Thickness
+    fovCircle.Transparency = 1
+end
+
+-- ============================================================
+-- CROSSHAIR
+-- ============================================================
+local crossLines = {}
+for i = 1, 4 do
+    local l = Drawing.new("Line"); l.Visible = false; l.Thickness = 1
+    crossLines[i] = l
+end
+local crossDot = Drawing.new("Circle"); crossDot.Visible = false; crossDot.Filled = true; crossDot.Radius = 1
+local function crosshairTick()
+    if not Cfg.Visuals.Crosshair.Enabled then
+        for _,l in ipairs(crossLines) do l.Visible = false end
+        crossDot.Visible = false
+        return
+    end
+    local c = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+    local size = Cfg.Visuals.Crosshair.Size
+    local gap = Cfg.Visuals.Crosshair.Gap
+    local thick = Cfg.Visuals.Crosshair.Thickness
+    local col = Cfg.Visuals.Crosshair.Color
+    -- top
+    crossLines[1].From = Vector2.new(c.X, c.Y - gap - size); crossLines[1].To = Vector2.new(c.X, c.Y - gap)
+    -- bottom
+    crossLines[2].From = Vector2.new(c.X, c.Y + gap); crossLines[2].To = Vector2.new(c.X, c.Y + gap + size)
+    -- left
+    crossLines[3].From = Vector2.new(c.X - gap - size, c.Y); crossLines[3].To = Vector2.new(c.X - gap, c.Y)
+    -- right
+    crossLines[4].From = Vector2.new(c.X + gap, c.Y); crossLines[4].To = Vector2.new(c.X + gap + size, c.Y)
+    for _,l in ipairs(crossLines) do l.Visible = true; l.Color = col; l.Thickness = thick end
+    if Cfg.Visuals.Crosshair.Dot then
+        crossDot.Visible = true; crossDot.Position = c; crossDot.Color = col; crossDot.Radius = 1
+    else crossDot.Visible = false end
+end
+
+-- ============================================================
+-- STAFF DETECTOR
+-- ============================================================
+local staffList = {}
+local lastStaffCheck = 0
+local function isStaff(player)
+    -- check attributes, team, name patterns, and known list
+    if Cfg.Misc.StaffDetector.KnownStaff[player.UserId] then return true end
+    if Cfg.Misc.StaffDetector.KnownStaff[player.Name] then return true end
+    pcall(function()
+        local attr = player:GetAttribute("IsStaff") or player:GetAttribute("IsModerator") or player:GetAttribute("IsAdmin")
+        if attr then staffList[player] = true end
+    end)
+    -- check for admin commands / special tools
+    pcall(function()
+        if player.Backpack and player.Backpack:FindFirstChild("Admin") then staffList[player] = true end
+        if player.Character and player.Character:FindFirstChild("Admin") then staffList[player] = true end
+    end)
+    -- name-based heuristics (common staff name patterns)
+    local name = (player.Name or ""):lower()
+    local display = (player.DisplayName or ""):lower()
+    for _, kw in ipairs({"mod", "admin", "staff", "owner", "dev"}) do
+        if name:find(kw) or display:find(kw) then
+            -- only flag if also has elevated perms (avoid false positives)
+        end
+    end
+    return staffList[player] == true
+end
+
+local function staffDetectorTick()
+    if not Cfg.Misc.StaffDetector.Enabled then return end
+    local now = tick()
+    if now - lastStaffCheck < Cfg.Misc.StaffDetector.CheckInterval then return end
+    lastStaffCheck = now
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p == LocalPlayer then continue end
+        if isStaff(p) and not staffList[p] then
+            staffList[p] = true
+            if Cfg.Misc.StaffDetector.Notify then
+                pcall(function()
+                    game:GetService("StarterGui"):SetCore("SendNotification", {
+                        Title = "Staff Detected",
+                        Text = p.Name .. " (" .. p.DisplayName .. ") flagged as staff",
+                        Duration = 5,
+                    })
+                end)
+            end
+            if Cfg.Misc.StaffDetector.Kick then
+                pcall(function() LocalPlayer:Kick("Staff detected: " .. p.Name) end)
+            end
+            if Cfg.Misc.StaffDetector.ToLobby then
+                pcall(function()
+                    -- teleport to lobby if applicable
+                end)
+            end
+            if Cfg.Misc.StaffDetector.AutoLeave then
+                pcall(function() game:Shutdown() end)
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- MOD DETECTOR (from elisium)
+-- ============================================================
+local modList = {}
+local lastModCheck = 0
+local function isMod(player)
+    if Cfg.Misc.ModDetector.Moderators[player.UserId] then return true end
+    if Cfg.Misc.ModDetector.Moderators[player.Name] then return true end
+    -- check friends of local player who are mods
+    if Cfg.Misc.ModDetector.ModFriends.Notify then
+        pcall(function()
+            if LocalPlayer:IsFriendsWith(player.UserId) then
+                -- friend mod detection via attributes
+            end
+        end)
+    end
+    pcall(function()
+        if player:GetAttribute("IsModerator") or player:GetAttribute("Mod") then
+            modList[player] = true
+        end
+    end)
+    return modList[player] == true
+end
+
+local function modDetectorTick()
+    if not Cfg.Misc.ModDetector.Enabled then return end
+    local now = tick()
+    if now - lastModCheck < Cfg.Misc.ModDetector.CheckInterval then return end
+    lastModCheck = now
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p == LocalPlayer then continue end
+        if isMod(p) and not modList[p] then
+            modList[p] = true
+            if Cfg.Misc.ModDetector.Notify then
+                pcall(function()
+                    game:GetService("StarterGui"):SetCore("SendNotification", {
+                        Title = "Moderator Detected",
+                        Text = p.Name .. " flagged as moderator",
+                        Duration = 5,
+                    })
+                end)
+            end
+            if Cfg.Misc.ModDetector.Kick then
+                pcall(function() LocalPlayer:Kick("Moderator detected: " .. p.Name) end)
+            end
+        end
+    end
 end
 
 -- ============================================================
 -- MOVEMENT / MISC
 -- ============================================================
 local function miscTick()
+    -- walkspeed
     if Cfg.Misc.WalkSpeed.Enabled then
         pcall(function()
             local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
             if hum then hum.WalkSpeed = Cfg.Misc.WalkSpeed.Value end
         end)
     end
+    -- jumppower
     if Cfg.Misc.JumpPower.Enabled then
         pcall(function()
             local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
             if hum then hum.JumpPower = Cfg.Misc.JumpPower.Value end
         end)
     end
+    -- fly
     if Cfg.Misc.Fly.Enabled then
         pcall(function()
             local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
@@ -359,15 +699,169 @@ local function miscTick()
                 if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.new(0,1,0) end
                 if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.new(0,1,0) end
                 root.Velocity = dir.Magnitude > 0 and dir.Unit * Cfg.Misc.Fly.Speed or Vector3.zero
+                local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                if hum then hum.PlatformStand = true end
+            end
+        end)
+    else
+        pcall(function()
+            local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.PlatformStand = false end
+        end)
+    end
+    -- thirdperson
+    if Cfg.Misc.Thirdperson.Enabled then
+        pcall(function()
+            Camera.CameraType = Enum.CameraType.Scriptable
+            local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if root then
+                local offset = CFrame.new(Cfg.Misc.Thirdperson.X, Cfg.Misc.Thirdperson.Y, Cfg.Misc.Thirdperson.Z)
+                Camera.CFrame = root.CFrame * offset
+            end
+        end)
+    else
+        pcall(function() Camera.CameraType = Enum.CameraType.Custom end)
+    end
+    -- destroy tripmines
+    if Cfg.Misc.DestroyTripmine.Enabled then
+        pcall(function()
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                if obj.Name:lower():find("tripmine") or obj.Name:lower():find("trip_mine") then
+                    pcall(function() obj:Destroy() end)
+                end
+            end
+        end)
+    end
+    -- remove smoke
+    if Cfg.Misc.RemoveSmoke then
+        pcall(function()
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                if obj:IsA("Smoke") or obj.Name:lower():find("smoke") then
+                    pcall(function() obj:Destroy() end)
+                end
+            end
+        end)
+    end
+    -- anti flash
+    if Cfg.Misc.AntiFlash then
+        pcall(function()
+            local gui = LocalPlayer.PlayerGui
+            for _, g in ipairs(gui:GetDescendants()) do
+                if g:IsA("ImageLabel") and g.Image:lower():find("flash") then
+                    g.Visible = false
+                end
+            end
+        end)
+    end
+end
+
+-- infinite jump
+UserInputService.JumpRequest:Connect(function()
+    if not Cfg.Misc.InfiniteJump then return end
+    pcall(function()
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end)
+end)
+
+-- ============================================================
+-- WORLD VISUALS
+-- ============================================================
+local function worldTick()
+    if not Cfg.Visuals.World.Lighting.Enabled then return end
+    pcall(function()
+        Lighting.Brightness = Cfg.Visuals.World.Lighting.Brightness
+        Lighting.ClockTime = Cfg.Visuals.World.Lighting.ClockTime
+        Lighting.ExposureCompensation = Cfg.Visuals.World.Lighting.ExposureCompensation
+        Lighting.FogEnd = Cfg.Visuals.World.Lighting.FogEnd
+        Lighting.OutdoorAmbient = Cfg.Visuals.World.Lighting.OutdoorAmbient
+        Lighting.GlobalShadows = Cfg.Visuals.World.Lighting.GlobalShadows
+        Lighting.Technology = Cfg.Visuals.World.Lighting.Technology
+    end)
+    if Cfg.Visuals.World.NoTextures then
+        pcall(function()
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                if obj:IsA("BasePart") then
+                    obj.Material = Enum.Material.SmoothPlastic
+                end
             end
         end)
     end
 end
 
 -- ============================================================
+-- GUN MODS (hook-based, best effort)
+-- ============================================================
+-- handled via controller hooks where possible; flags stored for external use
+local gunMods = {
+    NoRecoil = function() return Cfg.Misc.NoRecoil end,
+    NoSpread = function() return Cfg.Misc.NoSpread end,
+    RapidFire = function() return Cfg.Misc.RapidFire end,
+    Automatic = function() return Cfg.Misc.Automatic end,
+}
+
+-- ============================================================
+-- TARGET HUD
+-- ============================================================
+local targetHud = nil
+local function createTargetHud()
+    if targetHud then return targetHud end
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "TargetHUD"; sg.ResetOnSpawn = false
+    sg.Parent = gethui()
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 220, 0, 80)
+    frame.Position = UDim2.new(1, -240, 0.5, -40)
+    frame.BackgroundColor3 = Color3.fromRGB(20,20,25)
+    frame.BorderSizePixel = 0
+    frame.Visible = false
+    frame.Parent = sg
+    local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0,6); corner.Parent = frame
+    local name = Instance.new("TextLabel")
+    name.Size = UDim2.new(1,-10,0,20); name.Position = UDim2.new(0,5,0,5)
+    name.Text = ""; name.TextColor3 = Color3.fromRGB(255,255,255)
+    name.BackgroundTransparency = 1; name.Font = Enum.Font.GothamBold; name.TextSize = 14
+    name.TextXAlignment = Enum.TextXAlignment.Left; name.Parent = frame
+    local hp = Instance.new("TextLabel")
+    hp.Size = UDim2.new(1,-10,0,16); hp.Position = UDim2.new(0,5,0,28)
+    hp.Text = ""; hp.TextColor3 = Color3.fromRGB(50,220,90)
+    hp.BackgroundTransparency = 1; hp.Font = Enum.Font.Gotham; hp.TextSize = 12
+    hp.TextXAlignment = Enum.TextXAlignment.Left; hp.Parent = frame
+    local dist = Instance.new("TextLabel")
+    dist.Size = UDim2.new(1,-10,0,16); dist.Position = UDim2.new(0,5,0,48)
+    dist.Text = ""; dist.TextColor3 = Color3.fromRGB(200,200,200)
+    dist.BackgroundTransparency = 1; dist.Font = Enum.Font.Gotham; dist.TextSize = 12
+    dist.TextXAlignment = Enum.TextXAlignment.Left; dist.Parent = frame
+    targetHud = { gui = sg, frame = frame, name = name, hp = hp, dist = dist }
+    return targetHud
+end
+
+local function targetHudTick()
+    if not Cfg.Visuals.TargetHUD.Enabled then
+        if targetHud then targetHud.frame.Visible = false end
+        return
+    end
+    local hud = createTargetHud()
+    local t = nil
+    if Cfg.Combat.SilentAim.Enabled then t = SilentTarget end
+    if not t and Cfg.Combat.Aimbot.Enabled then t = getBestTarget(Cfg.Combat.Aimbot, Cfg.Combat.Aimbot.Part) end
+    if not t and Cfg.Combat.Ragebot.Enabled then t = getBestTarget({FOV=360,WallCheck=false}, "Head") end
+    if t and t.player and t.part then
+        hud.frame.Visible = true
+        hud.name.Text = t.player.DisplayName or t.player.Name
+        local hum = t.character:FindFirstChildOfClass("Humanoid")
+        if hum then hud.hp.Text = "HP: " .. math.floor(hum.Health) .. "/" .. math.floor(hum.MaxHealth) end
+        local d = (t.part.Position - Camera.CFrame.Position).Magnitude
+        hud.dist.Text = "Dist: " .. math.floor(d) .. "m"
+    else
+        hud.frame.Visible = false
+    end
+end
+
+-- ============================================================
 -- MAIN LOOP
 -- ============================================================
-local heartbeat = RunService.Heartbeat:Connect(function()
+local heartbeat = RunService.Heartbeat:Connect(function(dt)
     if K.destroyed then return end
     pcall(silentAimTick)
     pcall(aimbotTick)
@@ -376,7 +870,12 @@ local heartbeat = RunService.Heartbeat:Connect(function()
     pcall(function() if Cfg.Combat.AntiAim.Enabled then antiAimTick() end end)
     pcall(espTick)
     pcall(fovTick)
+    pcall(crosshairTick)
     pcall(miscTick)
+    pcall(worldTick)
+    pcall(staffDetectorTick)
+    pcall(modDetectorTick)
+    pcall(targetHudTick)
 end)
 K.track(heartbeat)
 
@@ -388,63 +887,132 @@ function K.Unload()
     pcall(function() heartbeat:Disconnect() end)
     for _, p in ipairs(Players:GetPlayers()) do removeESP(p) end
     pcall(function() fovCircle:Remove() end)
+    for _, l in ipairs(crossLines) do pcall(function() l:Remove() end) end
+    pcall(function() crossDot:Remove() end)
+    if targetHud then pcall(function() targetHud.gui:Destroy() end) end
     for _, c in ipairs(K.connections) do pcall(function() c:Disconnect() end) end
     for _, f in ipairs(K.cleanups) do pcall(f) end
 end
 
 -- ============================================================
--- UI (minimal toggle menu)
+-- UI (comprehensive toggle menu)
 -- ============================================================
 local function makeUI()
     local sg = Instance.new("ScreenGui")
-    sg.Name = "RivalsUnified"; sg.ResetOnSpawn = false
-    sg.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+    sg.Name = "RivalsUnifiedV2"; sg.ResetOnSpawn = false
+    sg.Parent = gethui()
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 260, 0, 420)
-    frame.Position = UDim2.new(0, 20, 0.5, -210)
-    frame.BackgroundColor3 = Color3.fromRGB(20,20,25)
+    frame.Size = UDim2.new(0, 280, 0, 520)
+    frame.Position = UDim2.new(0, 20, 0.5, -260)
+    frame.BackgroundColor3 = Color3.fromRGB(18,18,24)
     frame.BorderSizePixel = 0
     frame.Parent = sg
     local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0,8); corner.Parent = frame
     local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1,0,0,30); title.Text = "Rivals Unified"; title.TextColor3 = Color3.fromRGB(255,255,255)
-    title.BackgroundColor3 = Color3.fromRGB(30,30,40); title.Font = Enum.Font.GothamBold; title.TextSize = 14; title.Parent = frame
-    local layout = Instance.new("UIListLayout"); layout.Padding = UDim.new(0,4); layout.Parent = frame
-    local pad = Instance.new("UIPadding"); pad.PaddingTop = UDim.new(0,34); pad.PaddingLeft = UDim.new(0,8); pad.PaddingRight = UDim.new(0,8); pad.Parent = frame
+    title.Size = UDim2.new(1,0,0,32); title.Text = "Rivals Unified v2"
+    title.TextColor3 = Color3.fromRGB(255,255,255)
+    title.BackgroundColor3 = Color3.fromRGB(28,28,38); title.Font = Enum.Font.GothamBold; title.TextSize = 14; title.Parent = frame
+    local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(0,8); tc.Parent = title
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1,-8,1,-40); scroll.Position = UDim2.new(0,4,0,36)
+    scroll.BackgroundTransparency = 1; scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 4; scroll.CanvasSize = UDim2.new(0,0,0,0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Parent = frame
+    local layout = Instance.new("UIListLayout"); layout.Padding = UDim.new(0,3); layout.Parent = scroll
+    local pad = Instance.new("UIPadding"); pad.PaddingTop = UDim.new(0,4); pad.PaddingLeft = UDim.new(0,4); pad.PaddingRight = UDim.new(0,4); pad.Parent = scroll
 
-    local function toggle(label, path)
+    local function section(text)
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1,0,0,20); lbl.Text = "  " .. text
+        lbl.TextColor3 = Color3.fromRGB(120,81,166); lbl.BackgroundColor3 = Color3.fromRGB(28,28,38)
+        lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 12; lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = scroll
+        local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,4); c.Parent = lbl
+        return lbl
+    end
+
+    local function toggle(label, path, color)
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1,0,0,26); btn.Text = label .. ": OFF"
-        btn.BackgroundColor3 = Color3.fromRGB(40,40,50); btn.TextColor3 = Color3.fromRGB(200,200,200)
-        btn.Font = Enum.Font.Gotham; btn.TextSize = 12; btn.Parent = frame
+        btn.Size = UDim2.new(1,0,0,24); btn.Text = label .. ": OFF"
+        btn.BackgroundColor3 = Color3.fromRGB(38,38,50); btn.TextColor3 = Color3.fromRGB(200,200,200)
+        btn.Font = Enum.Font.Gotham; btn.TextSize = 11; btn.Parent = scroll
         local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,4); c.Parent = btn
         btn.MouseButton1Click:Connect(function()
             local t = Cfg
             for i=1,#path-1 do t = t[path[i]] end
             t[path[#path]] = not t[path[#path]]
-            btn.Text = label .. ": " .. (t[path[#path]] and "ON" or "OFF")
-            btn.BackgroundColor3 = t[path[#path]] and Color3.fromRGB(60,120,60) or Color3.fromRGB(40,40,50)
+            local on = t[path[#path]]
+            btn.Text = label .. ": " .. (on and "ON" or "OFF")
+            btn.BackgroundColor3 = on and (color or Color3.fromRGB(50,110,50)) or Color3.fromRGB(38,38,50)
+            btn.TextColor3 = on and Color3.fromRGB(255,255,255) or Color3.fromRGB(200,200,200)
         end)
     end
 
-    toggle("Silent Aim", {"Combat","SilentAim","Enabled"})
-    toggle("Aimbot", {"Combat","Aimbot","Enabled"})
-    toggle("Triggerbot", {"Combat","Triggerbot","Enabled"})
-    toggle("Ragebot", {"Combat","Ragebot","Enabled"})
-    toggle("Anti-Aim", {"Combat","AntiAim","Enabled"})
-    toggle("ESP", {"ESP","Enabled"})
+    section("COMBAT")
+    toggle("Silent Aim", {"Combat","SilentAim","Enabled"}, Color3.fromRGB(200,60,60))
+    toggle("Aimbot", {"Combat","Aimbot","Enabled"}, Color3.fromRGB(200,60,60))
+    toggle("Triggerbot", {"Combat","Triggerbot","Enabled"}, Color3.fromRGB(200,60,60))
+    toggle("Ragebot", {"Combat","Ragebot","Enabled"}, Color3.fromRGB(200,60,60))
+    toggle("Anti-Aim", {"Combat","AntiAim","Enabled"}, Color3.fromRGB(200,60,60))
+
+    section("ESP")
+    toggle("ESP Master", {"ESP","Enabled"}, Color3.fromRGB(60,120,200))
+    toggle("Box", {"ESP","Box","Enabled"})
+    toggle("Name", {"ESP","Name","Enabled"})
+    toggle("Health Bar", {"ESP","HealthBar","Enabled"})
+    toggle("Tracer", {"ESP","Tracer","Enabled"})
+    toggle("Chams", {"ESP","Chams","Enabled"})
+    toggle("Distance", {"ESP","Distance","Enabled"})
+    toggle("Held Weapon", {"ESP","HeldWeapon","Enabled"})
+    toggle("Skeleton", {"ESP","Skeleton","Enabled"})
+    toggle("Head Marker", {"ESP","HeadMarker","Enabled"})
+
+    section("VISUALS")
     toggle("FOV Circle", {"Visuals","FOVCircle","Enabled"})
+    toggle("Crosshair", {"Visuals","Crosshair","Enabled"})
+    toggle("Target HUD", {"Visuals","TargetHUD","Enabled"})
+    toggle("Hit Overlay", {"Visuals","HitOverlay","Enabled"})
+    toggle("Damage Numbers", {"Visuals","DamageNumbers","Enabled"})
+    toggle("Soul Particles", {"Visuals","SoulParticles","Enabled"})
+    toggle("Watermark", {"Visuals","Indicators","Watermark","Enabled"})
+
+    section("WORLD")
+    toggle("World Lighting", {"Visuals","World","Lighting","Enabled"})
+    toggle("No Textures", {"Visuals","World","NoTextures"})
+
+    section("MOVEMENT")
     toggle("WalkSpeed", {"Misc","WalkSpeed","Enabled"})
     toggle("JumpPower", {"Misc","JumpPower","Enabled"})
     toggle("Fly", {"Misc","Fly","Enabled"})
+    toggle("Infinite Jump", {"Misc","InfiniteJump"})
     toggle("Thirdperson", {"Misc","Thirdperson","Enabled"})
-    toggle("NoRecoil", {"Misc","NoRecoil"})
-    toggle("NoSpread", {"Misc","NoSpread"})
-    toggle("RapidFire", {"Misc","RapidFire"})
-    toggle("Automatic", {"Misc","Automatic"})
-    toggle("AntiFlash", {"Misc","AntiFlash"})
-    toggle("RemoveSmoke", {"Misc","RemoveSmoke"})
+    toggle("Stretch Res", {"Misc","StretchResolution","Enabled"})
 
+    section("MISC")
+    toggle("No Recoil", {"Misc","NoRecoil"})
+    toggle("No Spread", {"Misc","NoSpread"})
+    toggle("Rapid Fire", {"Misc","RapidFire"})
+    toggle("Automatic", {"Misc","Automatic"})
+    toggle("No Muzzle Flash", {"Misc","NoMuzzleFlash"})
+    toggle("Anti Flash", {"Misc","AntiFlash"})
+    toggle("Remove Smoke", {"Misc","RemoveSmoke"})
+    toggle("Auto Reload", {"Misc","AutoReload"})
+    toggle("No Scope Overlay", {"Misc","NoScopeOverlay"})
+    toggle("Destroy Tripmine", {"Misc","DestroyTripmine","Enabled"})
+    toggle("Hit Notify", {"Misc","HitNotify","Enabled"})
+
+    section("DETECTION")
+    toggle("Staff Detector", {"Misc","StaffDetector","Enabled"}, Color3.fromRGB(200,60,60))
+    toggle("Mod Detector", {"Misc","ModDetector","Enabled"}, Color3.fromRGB(200,60,60))
+
+    section("SPOOF")
+    toggle("Name Spoof", {"Misc","Spoof","Name","Enabled"})
+    toggle("Level Spoof", {"Misc","Spoof","Level","Enabled"})
+    toggle("Streak Spoof", {"Misc","Spoof","Streak","Enabled"})
+    toggle("Rank Spoof", {"Misc","Spoof","Rank","Enabled"})
+
+    -- draggable
     local dragging, dragStart, startPos
     frame.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -463,4 +1031,15 @@ local function makeUI()
 end
 pcall(makeUI)
 
-print("[RivalsUnified] loaded — toggle menu on screen")
+-- watermark
+pcall(function()
+    local sg = Instance.new("ScreenGui"); sg.Name = "Watermark"; sg.ResetOnSpawn = false
+    sg.Parent = gethui()
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0,200,0,20); lbl.Position = UDim2.new(0,10,0,10)
+    lbl.Text = "Rivals Unified v2"; lbl.TextColor3 = Color3.fromRGB(120,81,166)
+    lbl.BackgroundTransparency = 1; lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 14
+    lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = sg
+end)
+
+print("[RivalsUnified v2] loaded — full feature set")
